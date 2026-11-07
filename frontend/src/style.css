@@ -18,3 +18,9 @@
 .empty-state{padding:24px;text-align:center;color:#697970;background:#f8fbf9;border-radius:9px}
 .detail{padding:18px;border:1px solid #dce6df;border-radius:10px;margin:16px 0;background:#fafdfb}
 @media(max-width:850px){.expense-list-card{padding:18px}.table-scroll{margin-right:-2px}.summary{gap:20px;flex-wrap:wrap}}
+.expense-table td.detail-row{padding:0 14px 16px;background:#f8fbf9}
+.inline-detail{padding:16px;border-radius:8px;background:#fff;border:1px solid #e1ebe4}
+.inline-detail strong{display:block;margin-bottom:10px}.inline-detail p{margin:6px 0;color:#53695e}
+.inline-detail ul{list-style:none;padding:0;max-width:540px;margin:10px 0}
+.inline-detail li{display:flex;justify-content:space-between;gap:24px;padding:6px 0;border-bottom:1px solid #eef3ef}
+.inline-detail li span:last-child{white-space:nowrap;font-variant-numeric:tabular-nums}
