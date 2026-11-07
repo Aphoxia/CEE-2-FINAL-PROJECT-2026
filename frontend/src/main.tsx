@@ -19,6 +19,9 @@ function App() {
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(true);
   const [role, setRole] = useState('');
+  const [departments, setDepartments] = useState<string[]>([]);
+  const [myDepartments, setMyDepartments] = useState<string[]>([]);
+  const [departmentBusy, setDepartmentBusy] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState(false);
@@ -41,13 +44,40 @@ function App() {
     return () => data.subscription.unsubscribe();
   }, []);
   useEffect(() => {
-    setRole(''); setListing(null); setScope('own'); setDraft(blank()); setEditingId(null); setDetail(null); setHadBreakdown(false);
+    setRole(''); setListing(null); setScope('own'); setDraft(blank()); setEditingId(null); setDetail(null); setHadBreakdown(false); setDepartments([]); setMyDepartments([]);
     if (!session || !supabase) return;
     let active = true;
-    supabase.from('organization_members').select('access_role').eq('user_id', session.user.id).maybeSingle()
-      .then(({ data, error: e }) => { if (active) { if (e) setError('ไม่สามารถตรวจสอบสมาชิกได้'); else if (!data) setError('บัญชีนี้ยังไม่ได้รับสิทธิ์สมาชิก'); else { setError(''); setRole(data.access_role); } } });
+    const client = supabase;
+    async function initialize() {
+      const { error: joinError } = await client!.rpc('ensure_member');
+      if (!active) return;
+      if (joinError) { setError('ไม่สามารถเปิดใช้งานบัญชีได้ กรุณาลองใหม่'); return; }
+      const [membership, available, assigned] = await Promise.all([
+        client!.from('organization_members').select('access_role').eq('user_id', session!.user.id).maybeSingle(),
+        client!.from('departments').select('name').order('name'),
+        client!.from('user_departments').select('department_name').eq('user_id', session!.user.id),
+      ]);
+      if (!active) return;
+      if (membership.error || !membership.data) { setError('ไม่สามารถตรวจสอบสมาชิกได้'); return; }
+      setRole(membership.data.access_role); setError('');
+      if (available.error || assigned.error) { setError('ไม่สามารถโหลดแผนกได้'); return; }
+      setDepartments((available.data ?? []).map(row => row.name));
+      setMyDepartments((assigned.data ?? []).map(row => row.department_name));
+    }
+    void initialize();
     return () => { active = false; };
   }, [session?.user.id]);
+
+  async function toggleDepartment(name: string, checked: boolean) {
+    if (!supabase || !session) return;
+    setDepartmentBusy(true); setError('');
+    const result = checked
+      ? await supabase.from('user_departments').insert({ user_id: session.user.id, department_name: name })
+      : await supabase.from('user_departments').delete().eq('user_id', session.user.id).eq('department_name', name);
+    if (result.error) setError('ไม่สามารถเปลี่ยนแผนกได้ กรุณาลองใหม่');
+    else setMyDepartments(current => checked ? [...current, name] : current.filter(item => item !== name));
+    setDepartmentBusy(false);
+  }
 
   async function api(path: string, options: RequestInit = {}) {
     if (!session) throw new Error('กรุณาล็อกอินอีกครั้ง');
@@ -112,6 +142,7 @@ function App() {
     {error && <p className="alert" role="alert">{error}</p>}{notice && <p className="notice" role="status">{notice}</p>}
     {loading ? <p>กำลังโหลด...</p> : !session ? <section className="card"><h2>เข้าสู่ระบบ</h2><p>ใช้บัญชี Google ที่เพิ่มเป็น test user แล้ว</p><button onClick={async () => { const { error: e } = await supabase.auth.signInWithOAuth({ provider:'google', options:{ redirectTo: window.location.origin } }); if (e) setError(e.message); }}>เข้าสู่ระบบด้วย Google</button></section> : !role ? <section className="card">กำลังตรวจสอบสิทธิ์สมาชิก หรือบัญชียังไม่ได้รับสิทธิ์</section> : <>
       <div className="identity">{session.user.email} <span className="badge">{role === 'finance_head' ? 'Finance Head' : 'สมาชิกทั่วไป'}</span></div>
+      <section className="card department-card"><h2>แผนกในชมรม</h2><p className="muted">เลือกได้หลายแผนกเพื่อทดลอง แผนกไม่ได้เปลี่ยนสิทธิ์ Finance Head</p><div className="department-options">{departments.map(name => <label key={name}><input type="checkbox" checked={myDepartments.includes(name)} disabled={departmentBusy} onChange={e => toggleDepartment(name, e.target.checked)} />{name}</label>)}</div></section>
       <div className="layout"><section className="card"><h2>เพิ่มค่าใช้จ่าย</h2><p className="muted">สแกนใบเสร็จหรือกรอกเอง · จำนวนเงินเป็นบาท</p><div className="scan"><input ref={fileInput} type="file" accept="image/jpeg,image/png,image/webp" aria-label="รูปใบเสร็จ" onChange={e => setFile(e.target.files?.[0] ?? null)} /><button type="button" disabled={busy} onClick={scan}>สแกนใบเสร็จ</button></div><form onSubmit={save}><label>ประเภทเอกสาร<select value={draft.documentType} onChange={e => setDraft({ ...draft, documentType:e.target.value as Draft['documentType'] })}><option value="receipt">ใบเสร็จ</option><option value="transfer">สลิปโอนเงิน</option></select></label><label>ร้านค้า<input maxLength={200} value={draft.shopName} onChange={e => setDraft({ ...draft, shopName:e.target.value })} /></label><label>ผู้รับเงิน<input maxLength={200} value={draft.payeeName} onChange={e => setDraft({ ...draft, payeeName:e.target.value })} /></label><p className="muted">ระบุชื่อร้านค้าหรือผู้รับเงินอย่างน้อยหนึ่งช่อง</p><label>วันที่<input required type="date" value={draft.purchaseDate} onChange={e => setDraft({ ...draft, purchaseDate:e.target.value })} /></label><label>ยอดจ่ายจริง (บาท)<input required inputMode="decimal" value={draft.total} onChange={e => setDraft({ ...draft, total:e.target.value })} onBlur={e => setDraft(d => ({ ...d, total:formatMoneyInput(e.target.value) }))} /></label>{renderEntries('lineItems','รายการสินค้า')}{renderEntries('adjustments','ส่วนปรับยอด')}<p className="muted">ส่วนลดใช้ค่าติดลบ เช่น -5.00 · ผลรวมต้องตรงยอดจ่ายจริง</p><div className="actions"><button disabled={busy}>{editingId ? 'บันทึกการแก้ไข' : 'ยืนยันและบันทึก'}</button><button type="button" className="secondary" onClick={() => {setDraft(blank()); setEditingId(null);}}>ล้างแบบฟอร์ม</button></div></form></section>
       <section className="card"><h2>รายการค่าใช้จ่าย</h2><form onSubmit={e => { e.preventDefault(); void load(); }} className="filters">{role === 'finance_head' && <label>ขอบเขต<select value={scope} onChange={e => setScope(e.target.value)}><option value="own">ของฉัน</option><option value="organization">ทั้งองค์กร</option></select></label>}<label>ปี ค.ศ.<input inputMode="numeric" placeholder="2026" value={year} onChange={e => setYear(e.target.value)} /></label><label>เดือน<select value={month} onChange={e => setMonth(e.target.value)}><option value="">ทุกเดือน</option>{Array.from({length:12},(_, i) => <option key={i} value={i+1}>{i+1}</option>)}</select></label>{scope === 'organization' && role === 'finance_head' && <><label>แผนก<input placeholder="เช่น IT" value={department} onChange={e => setDepartment(e.target.value)} /></label><label>Owner UUID<input placeholder="UUID ของเจ้าของ" value={owner} onChange={e => setOwner(e.target.value)} /></label></>}<button>ใช้ตัวกรอง</button></form><p className="muted">หากเลือกเดือน ต้องระบุปี · ชื่อแผนกต้องตรงตัวพิมพ์</p>{listing && <><div className="summary"><div><small>ยอดรวมตามตัวกรอง</small><strong>฿{toBaht(listing.runningTotalSatang)}</strong></div><div><small>จำนวนรายการ</small><strong>{listing.totalCount}</strong></div></div>{listing.expenses.length ? <ul className="expenses">{listing.expenses.map(item => <li key={item.id}><div><strong>{item.shopName || item.payeeName}</strong><small>{item.documentType === 'transfer' ? 'สลิปโอนเงิน · ' : 'ใบเสร็จ · '}{item.purchaseDate}{item.ownerId && <> · {item.ownerId}</>}</small></div><div className="expense-actions"><strong>฿{toBaht(item.totalPaidSatang)}</strong><button className="link" onClick={() => showDetail(item.id)}>ดูรายละเอียด</button>{(!item.ownerId || item.ownerId === session.user.id) && <span><button className="link" onClick={() => edit(item.id)}>แก้ไข</button><button className="link danger" onClick={() => remove(item.id)}>ลบ</button></span>}</div></li>)}</ul> : <p className="muted">ยังไม่มีรายการที่ตรงกับตัวกรอง</p>}{detail && <div className="detail"><h3>รายละเอียด · {detail.shopName || detail.payeeName}</h3>{detail.shopName && <p>ร้านค้า: {detail.shopName}</p>}{detail.payeeName && <p>ผู้รับเงิน: {detail.payeeName}</p>}{detail.lineItems?.length ? <ul>{detail.lineItems.map((item, i) => <li key={i}>{item.description}: ฿{toBaht(item.amountSatang)}</li>)}</ul> : <p>ไม่มีรายละเอียดสินค้า</p>}{detail.adjustments?.map((item, i) => <p key={i}>{item.description}: ฿{toBaht(item.amountSatang)}</p>)}<button className="secondary" onClick={() => setDetail(null)}>ปิดรายละเอียด</button></div>}<div className="actions"><button className="secondary" disabled={offset === 0} onClick={() => load(Math.max(0, offset - 20))}>ก่อนหน้า</button><button className="secondary" disabled={offset + 20 >= listing.totalCount} onClick={() => load(offset + 20)}>ถัดไป</button></div></>}</section></div>
     </>}</main>;

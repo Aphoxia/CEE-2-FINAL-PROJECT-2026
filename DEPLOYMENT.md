@@ -9,6 +9,6 @@ Set these environment variables in Vercel for the deployment environment:
 * `GEMINI_API_KEY`: server-side only. Never use a `VITE_` prefix for this key.
 * `GEMINI_MODEL`: optional; defaults to `gemini-3.5-flash-lite`.
 
-Apply Supabase migrations through `20261107000004_transfer_slips.sql` first. Add the exact deployed origin to Supabase Auth Redirect URLs. While Google OAuth is in Testing, add each tester in Google Cloud OAuth Audience; a trusted administrator must also add their Supabase user ID to `organization_members` after their first login.
+Apply Supabase migrations through `20261107000005_open_membership_departments.sql` first. Add the exact deployed origin to Supabase Auth Redirect URLs. While Google OAuth is in Testing, add each tester in Google Cloud OAuth Audience. The app enrolls signed-in users as regular members; only a trusted administrator can assign Finance Head.
 
 Check the deployed page, Google login, an authenticated expense request, and a synthetic image upload before sharing. Vercel routing, upload limits, deployment protection and function timeouts must be verified in the deployed environment; local tests alone do not verify those platform integrations. Only use mock financial data for the course demonstration.

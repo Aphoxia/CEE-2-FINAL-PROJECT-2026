@@ -51,6 +51,10 @@ beforeAll(async () => {
     new URL('../../supabase/migrations/20261107000004_transfer_slips.sql', import.meta.url),
     'utf8',
   ));
+  await db.exec(await readFile(
+    new URL('../../supabase/migrations/20261107000005_open_membership_departments.sql', import.meta.url),
+    'utf8',
+  ));
   await db.query('insert into auth.users (id) values ($1), ($2), ($3), ($4), ($5)', [
     alice, bob, guest, emptyMember, may,
   ]);
@@ -58,7 +62,7 @@ beforeAll(async () => {
     "insert into public.organization_members (user_id, access_role) values ($1, 'finance_head')",
     [may],
   );
-  await db.exec("insert into public.departments (name) values ('IT'), ('BOARD')");
+  await db.exec("insert into public.departments (name) values ('IT'), ('BOARD') on conflict do nothing");
   await db.query(`
     insert into public.user_departments (user_id, department_name)
     values ($1, 'IT'), ($1, 'BOARD'), ($2, 'BOARD')
@@ -335,6 +339,32 @@ describe('GET /api/expenses', () => {
 });
 
 describe('database permissions without Express', () => {
+  it('enrolls a signed-in user as a member and restricts department edits to themselves', async () => {
+    try {
+      await queryAsUser(guest, 'select public.ensure_member()');
+      await queryAsUser(guest, 'select public.ensure_member()');
+      await queryAsUser(may, 'select public.ensure_member()');
+      const finance = await queryAsUser(may, 'select access_role from public.organization_members');
+      expect(finance.rows).toEqual([{ access_role: 'finance_head' }]);
+      const membership = await queryAsUser(guest, 'select access_role from public.organization_members');
+      expect(membership.rows).toEqual([{ access_role: 'member' }]);
+      await expect(queryAsUser(guest, "update public.organization_members set access_role = 'finance_head' where user_id = $1", [guest]))
+        .rejects.toMatchObject({ code: '42501' });
+      await queryAsUser(guest, "insert into public.user_departments (user_id, department_name) values ($1, 'IT')", [guest]);
+      await queryAsUser(guest, "insert into public.user_departments (user_id, department_name) values ($1, 'FINANCE')", [guest]);
+      const unchangedRole = await queryAsUser(guest, 'select access_role from public.organization_members');
+      expect(unchangedRole.rows).toEqual([{ access_role: 'member' }]);
+      await expect(queryAsUser(guest, "insert into public.user_departments (user_id, department_name) values ($1, 'FINANCE')", [bob]))
+        .rejects.toMatchObject({ code: '42501' });
+      const removed = await queryAsUser(guest, 'delete from public.user_departments where user_id = $1 returning user_id', [bob]);
+      expect(removed.rows).toEqual([]);
+      await request(app).get('/api/expenses').auth('guest-token', { type: 'bearer' }).expect(200);
+    } finally {
+      await db.query('delete from public.user_departments where user_id = $1', [guest]);
+      await db.query('delete from public.organization_members where user_id = $1', [guest]);
+    }
+  });
+
   it('shows each member only their own rows, including when they query a different owner', async () => {
     const aliceRows = await queryAsUser(alice, 'select distinct owner_id from public.expenses');
     const bobRows = await queryAsUser(bob, 'select distinct owner_id from public.expenses');

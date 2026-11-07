@@ -32,13 +32,14 @@ A user's collection of saved expenses, readable by that user and Finance Head.
 The sum of the total paid across the user's saved expenses.
 
 **Member**:
-A user approved to access the team's expenses application.
+A signed-in user who has joined the application as a regular member. New sign-ins can join automatically; Finance Head access is assigned separately by a trusted administrator.
 
 **Finance Head**:
 A member with permission to read all retained team expenses and their summaries. Owners manage their own expenses.
 
 **Department**:
 A descriptive team label such as IT or BOARD. A user may belong to multiple departments, independently of Finance Head permissions.
+For the test app, members choose their own departments; these selections are unverified labels, not proof of an official position.
 
 **Line item**
 A purchased item or group of identical items on a receipt, with a description and the full line amount after any item-level discount.
