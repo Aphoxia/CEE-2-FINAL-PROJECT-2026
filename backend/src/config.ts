@@ -16,5 +16,6 @@ export function createConfiguredApp() {
     supabasePublishableKey: config.data.SUPABASE_PUBLISHABLE_KEY,
     geminiApiKey: config.data.GEMINI_API_KEY,
     geminiModel: config.data.GEMINI_MODEL,
+    vercelRouting: process.env.VERCEL === '1',
   });
 }

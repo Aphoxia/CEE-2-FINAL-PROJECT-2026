@@ -14,6 +14,7 @@ type AppConfig = {
   geminiApiKey?: string;
   geminiModel?: string;
   geminiFetch?: typeof globalThis.fetch;
+  vercelRouting?: boolean;
 };
 
 type Session = {
@@ -132,7 +133,14 @@ export function createApp(config: AppConfig) {
 
   app.get('/api/expenses', async (req, res) => {
     const { supabase, accessRole }: Session = res.locals.session;
-    const query = expenseQuery.safeParse(req.query);
+    const parameters = { ...req.query };
+    // Vercel adds the catch-all route parameter to its query helper. It is not
+    // a user-selected filter; keep rejecting any other unexpected parameters.
+    if (config.vercelRouting && (parameters.path === 'expenses'
+      || (Array.isArray(parameters.path) && parameters.path.length === 1 && parameters.path[0] === 'expenses'))) {
+      delete parameters.path;
+    }
+    const query = expenseQuery.safeParse(parameters);
     if (!query.success) {
       return res.status(400).json({ error: 'invalid_expense_query' });
     }

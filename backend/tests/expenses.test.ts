@@ -196,6 +196,18 @@ const app = createApp({
 });
 
 describe('GET /api/expenses', () => {
+  it('ignores only the Vercel catch-all route parameter on Vercel', async () => {
+    const deployedApp = createApp({
+      supabaseUrl: 'https://receipt-test.example', supabasePublishableKey: 'sb_publishable_fixture',
+      fetch: supabaseFetch, vercelRouting: true,
+    });
+    await request(deployedApp).get('/api/expenses?path=expenses&scope=own')
+      .auth('alice-token', { type: 'bearer' }).expect(200);
+    await request(deployedApp).get('/api/expenses?path=other')
+      .auth('alice-token', { type: 'bearer' }).expect(400);
+    await request(app).get('/api/expenses?path=expenses')
+      .auth('alice-token', { type: 'bearer' }).expect(400);
+  });
   it('rejects missing and invalid bearer tokens', async () => {
     await request(app).get('/api/expenses').expect(401, { error: 'unauthenticated' });
     await request(app).get('/api/expenses').auth('invalid-token', { type: 'bearer' })
