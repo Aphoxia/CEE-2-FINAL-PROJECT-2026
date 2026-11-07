@@ -24,3 +24,8 @@
 .inline-detail ul{list-style:none;padding:0;max-width:540px;margin:10px 0}
 .inline-detail li{display:flex;justify-content:space-between;gap:24px;padding:6px 0;border-bottom:1px solid #eef3ef}
 .inline-detail li span:last-child{white-space:nowrap;font-variant-numeric:tabular-nums}
+.date-filter{position:relative;margin:12px 0;min-width:0}.filter-label{display:block;font-size:.86rem;font-weight:600;margin-bottom:5px}
+.date-trigger{width:100%;min-height:42px;display:flex;align-items:center;justify-content:space-between;gap:8px;text-align:left;background:white;color:#1e3029;border:1px solid #cbd9d0;font-weight:400}
+.date-panel{position:absolute;top:100%;left:0;z-index:5;width:min(340px,calc(100vw - 64px));padding:16px;background:#fff;border:1px solid #dce6df;border-radius:10px;box-shadow:0 12px 30px #203d3028}
+.date-panel-title{font-weight:700;margin:0 0 10px}.date-mode-options{display:flex;flex-wrap:wrap;gap:6px}.date-mode{padding:7px 9px;background:#f0f5f1;color:#315746;font-size:.8rem}.date-mode.selected{background:#267450;color:#fff}
+.date-panel-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}.date-panel-actions button{margin:0}
