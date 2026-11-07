@@ -1,6 +1,6 @@
 # Receipt Scanner backend
 
-Milestones 1 and 2 expose personal expense lists and Finance Head reporting. Use Node.js 24 or newer.
+Milestones 1–3 expose personal expense management and Finance Head reporting. Use Node.js 24 or newer.
 
 ## Run locally
 
@@ -54,7 +54,42 @@ Department filters use current assignments. An expense contributes once even whe
 its owner belongs to multiple departments. Administrators can populate `departments`
 and `user_departments` with development data in the SQL editor.
 Finance Head status is read from the protected membership table for each request.
-Authenticated application users have read privileges only in this milestone.
+Members can create, edit and delete their own expenses. Finance Head can read team
+expenses and manage their own expenses.
+
+## Expense writes
+
+All write routes require a verified Supabase access token and active membership.
+Apply `20261107000002_expense_writes.sql` after the two earlier migrations.
+
+| Request | Body | Successful response |
+| --- | --- | --- |
+| `POST /api/expenses` | All three fields below | `201` and the new expense |
+| `PATCH /api/expenses/:id` | One or more of those fields | `200` and the updated expense |
+| `DELETE /api/expenses/:id` | None | `204` with an empty body |
+
+```json
+{
+  "shopName": "Sample shop",
+  "purchaseDate": "2026-11-07",
+  "totalPaidSatang": 4500
+}
+```
+
+Shop names are trimmed and must have 1–200 characters. Purchase dates must be real
+calendar dates in `YYYY-MM-DD` format, from year 0001. Amounts are integer satang
+from 0 to 2147483647. PATCH requires at least one field. Unexpected fields,
+including ownership and system-generated fields, return `400`.
+
+PostgreSQL generates the expense ID and assigns ownership from the caller's verified
+identity. Column privileges prevent users from inserting or changing `owner_id`.
+Each write is a single database statement. RLS requires current membership and
+ownership for writes, including requests made directly to Supabase.
+
+PATCH and DELETE return `404` when there is no matching owned expense.
+Malformed JSON returns `400`; JSON bodies over 16 KB return `413`.
+New POST requests create separate expense records. Exact receipt-photo duplicate
+detection and line-item reconciliation belong to the scan-and-confirm milestone.
 
 ## Run the tests
 

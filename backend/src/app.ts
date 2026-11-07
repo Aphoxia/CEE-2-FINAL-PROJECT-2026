@@ -1,4 +1,4 @@
-import { createClient } from '@supabase/supabase-js';
+import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import express, { type ErrorRequestHandler } from 'express';
 import { z } from 'zod';
 
@@ -7,6 +7,22 @@ type AppConfig = {
   supabasePublishableKey: string;
   fetch?: typeof globalThis.fetch;
 };
+
+type Session = {
+  supabase: SupabaseClient;
+  userId: string;
+  accessRole: string;
+};
+
+const expenseFields = {
+  shopName: z.string().trim().min(1).max(200),
+  purchaseDate: z.iso.date().refine(value => value >= '0001-01-01'),
+  totalPaidSatang: z.int().min(0).max(2_147_483_647),
+};
+const createExpense = z.strictObject(expenseFields);
+const updateExpense = createExpense.partial().refine(value => Object.keys(value).length > 0);
+const expenseId = z.uuid();
+const expenseSelection = 'id, shopName:shop_name, purchaseDate:purchase_date, totalPaidSatang:total_paid_satang';
 
 const expenseQuery = z.strictObject({
   scope: z.enum(['own', 'organization']).optional(),
@@ -21,7 +37,7 @@ const expenseQuery = z.strictObject({
 export function createApp(config: AppConfig) {
   const app = express();
 
-  app.get('/api/expenses', async (req, res) => {
+  app.use('/api/expenses', async (req, res, next) => {
     res.set('Cache-Control', 'no-store');
     const token = /^Bearer (\S+)$/i.exec(req.get('Authorization') ?? '')?.[1];
     if (!token) {
@@ -59,13 +75,25 @@ export function createApp(config: AppConfig) {
       return res.status(403).json({ error: 'membership_required' });
     }
 
+    res.locals.session = {
+      supabase,
+      userId: user.id,
+      accessRole: membership.access_role,
+    } satisfies Session;
+    next();
+  });
+
+  app.use('/api/expenses', express.json({ limit: '16kb' }));
+
+  app.get('/api/expenses', async (req, res) => {
+    const { supabase, accessRole }: Session = res.locals.session;
     const query = expenseQuery.safeParse(req.query);
     if (!query.success) {
       return res.status(400).json({ error: 'invalid_expense_query' });
     }
 
     const scope = query.data.scope ?? 'own';
-    if (scope === 'organization' && membership.access_role !== 'finance_head') {
+    if (scope === 'organization' && accessRole !== 'finance_head') {
       return res.status(403).json({ error: 'finance_head_required' });
     }
     if (
@@ -92,7 +120,62 @@ export function createApp(config: AppConfig) {
     return res.json(data);
   });
 
-  const handleError: ErrorRequestHandler = (_error, _req, res, _next) => {
+  app.post('/api/expenses', async (req, res) => {
+    const body = createExpense.safeParse(req.body);
+    if (!body.success) {
+      return res.status(400).json({ error: 'invalid_expense' });
+    }
+    const { supabase }: Session = res.locals.session;
+    const { data, error } = await supabase.from('expenses').insert({
+      shop_name: body.data.shopName,
+      purchase_date: body.data.purchaseDate,
+      total_paid_satang: body.data.totalPaidSatang,
+    }).select(expenseSelection).single();
+    // PostgreSQL supplies owner_id from the verified caller's identity.
+    if (error) throw error;
+    return res.status(201).json(data);
+  });
+
+  app.patch('/api/expenses/:id', async (req, res) => {
+    const id = expenseId.safeParse(req.params.id);
+    const body = updateExpense.safeParse(req.body);
+    if (!id.success || !body.success) {
+      return res.status(400).json({ error: 'invalid_expense' });
+    }
+    const { supabase, userId }: Session = res.locals.session;
+    const { data, error } = await supabase.from('expenses').update({
+      shop_name: body.data.shopName,
+      purchase_date: body.data.purchaseDate,
+      total_paid_satang: body.data.totalPaidSatang,
+    }).eq('id', id.data).eq('owner_id', userId).select(expenseSelection).maybeSingle();
+    if (error) throw error;
+    if (!data) return res.status(404).json({ error: 'expense_not_found' });
+    return res.json(data);
+  });
+
+  app.delete('/api/expenses/:id', async (req, res) => {
+    const id = expenseId.safeParse(req.params.id);
+    if (!id.success) {
+      return res.status(400).json({ error: 'invalid_expense_id' });
+    }
+    const { supabase, userId }: Session = res.locals.session;
+    const { data, error } = await supabase.from('expenses').delete()
+      .eq('id', id.data).eq('owner_id', userId).select('id').maybeSingle();
+    if (error) throw error;
+    if (!data) return res.status(404).json({ error: 'expense_not_found' });
+    return res.status(204).end();
+  });
+
+  const handleError: ErrorRequestHandler = (error, _req, res, _next) => {
+    if (error.type === 'entity.parse.failed') {
+      return res.status(400).json({ error: 'invalid_json' });
+    }
+    if (error.type === 'entity.too.large') {
+      return res.status(413).json({ error: 'request_too_large' });
+    }
+    if (error.code === '42501') {
+      return res.status(403).json({ error: 'access_denied' });
+    }
     res.status(500).json({ error: 'internal_error' });
   };
   app.use(handleError);
