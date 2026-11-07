@@ -201,11 +201,11 @@ describe('GET /api/expenses', () => {
       supabaseUrl: 'https://receipt-test.example', supabasePublishableKey: 'sb_publishable_fixture',
       fetch: supabaseFetch, vercelRouting: true,
     });
-    await request(deployedApp).get('/api/expenses?path=expenses&scope=own')
+    await request(deployedApp).get('/api/expenses?...path=expenses&scope=own')
       .auth('alice-token', { type: 'bearer' }).expect(200);
-    await request(deployedApp).get('/api/expenses?path=other')
+    await request(deployedApp).get('/api/expenses?...path=other')
       .auth('alice-token', { type: 'bearer' }).expect(400);
-    await request(app).get('/api/expenses?path=expenses')
+    await request(app).get('/api/expenses?...path=expenses')
       .auth('alice-token', { type: 'bearer' }).expect(400);
   });
   it('rejects missing and invalid bearer tokens', async () => {

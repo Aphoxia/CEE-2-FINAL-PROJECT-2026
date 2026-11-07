@@ -136,9 +136,10 @@ export function createApp(config: AppConfig) {
     const parameters = { ...req.query };
     // Vercel adds the catch-all route parameter to its query helper. It is not
     // a user-selected filter; keep rejecting any other unexpected parameters.
-    if (config.vercelRouting && (parameters.path === 'expenses'
-      || (Array.isArray(parameters.path) && parameters.path.length === 1 && parameters.path[0] === 'expenses'))) {
-      delete parameters.path;
+    const routeParameter = parameters['...path'];
+    if (config.vercelRouting && (routeParameter === 'expenses'
+      || (Array.isArray(routeParameter) && routeParameter.length === 1 && routeParameter[0] === 'expenses'))) {
+      delete parameters['...path'];
     }
     const query = expenseQuery.safeParse(parameters);
     if (!query.success) {
