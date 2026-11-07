@@ -25,7 +25,7 @@ beforeAll(async () => {
     create role anon;
     create role authenticated;
     create schema auth;
-    create table auth.users (id uuid primary key);
+    create table auth.users (id uuid primary key, raw_user_meta_data jsonb not null default '{}'::jsonb);
     create function auth.uid() returns uuid language sql stable as $$
       select (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')::uuid;
     $$;
@@ -55,6 +55,7 @@ beforeAll(async () => {
     new URL('../../supabase/migrations/20261107000005_open_membership_departments.sql', import.meta.url),
     'utf8',
   ));
+  await db.exec(await readFile(new URL('../../supabase/migrations/20261108000006_member_display_names.sql', import.meta.url), 'utf8'));
   await db.query('insert into auth.users (id) values ($1), ($2), ($3), ($4), ($5)', [
     alice, bob, guest, emptyMember, may,
   ]);
@@ -197,6 +198,36 @@ const app = createApp({
   supabaseUrl: 'https://receipt-test.example',
   supabasePublishableKey: 'sb_publishable_fixture',
   fetch: supabaseFetch,
+});
+
+describe('member display names', () => {
+  it('initializes once, preserves edits, and protects profiles', async () => {
+    await db.query("update auth.users set raw_user_meta_data = $1::jsonb where id = any($2::uuid[])", [JSON.stringify({full_name: 'Alice Google'}), [alice, bob]]);
+    await queryAsUser(alice, 'select public.ensure_member()');
+    await queryAsUser(bob, 'select public.ensure_member()');
+    const own = await queryAsUser<{display_name: string}>(alice, 'select display_name from public.member_profiles');
+    expect(own.rows).toEqual([{ display_name: 'Alice Google' }]);
+    await queryAsUser(alice, "update public.member_profiles set display_name = 'New name' where user_id = $1", [alice]);
+    await queryAsUser(alice, 'select public.ensure_member()');
+    expect((await queryAsUser<{display_name: string}>(alice, 'select display_name from public.member_profiles')).rows[0].display_name).toBe('New name');
+    const other = await queryAsUser(alice, "update public.member_profiles set display_name = 'Changed' where user_id = $1 returning user_id", [bob]);
+    expect(other.rows).toEqual([]);
+    await expect(queryAsUser(alice, "update public.organization_members set access_role = 'finance_head' where user_id = $1", [alice])).rejects.toThrow();
+    const visible = await queryAsUser<{user_id: string}>(may, 'select user_id from public.member_profiles');
+    expect(visible.rows.map(row => row.user_id)).toEqual(expect.arrayContaining([alice, bob]));
+  });
+
+  it('uses a fallback without a Google name and keeps same-named users distinct in filtering', async () => {
+    await queryAsUser(emptyMember, 'select public.ensure_member()');
+    const fallback = await queryAsUser<{display_name: string}>(emptyMember, 'select display_name from public.member_profiles');
+    expect(fallback.rows).toEqual([{ display_name: 'ยังไม่ได้ตั้งชื่อ' }]);
+    await queryAsUser(alice, "update public.member_profiles set display_name = 'Same name' where user_id = $1", [alice]);
+    await queryAsUser(bob, "update public.member_profiles set display_name = 'Same name' where user_id = $1", [bob]);
+    const filtered = await queryAsUser<{result: {expenses: {ownerId: string}[]; runningTotalSatang: number}}>(may,
+      "select public.list_expenses('organization', $1, null, null, null, 50, 0) as result", [alice]);
+    expect(filtered.rows[0].result.expenses.every(expense => expense.ownerId === alice)).toBe(true);
+    expect(filtered.rows[0].result.runningTotalSatang).toBe(5500);
+  });
 });
 
 describe('GET /api/expenses', () => {
