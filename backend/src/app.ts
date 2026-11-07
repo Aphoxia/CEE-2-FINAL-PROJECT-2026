@@ -14,6 +14,7 @@ type AppConfig = {
   geminiApiKey?: string;
   geminiModel?: string;
   geminiFetch?: typeof globalThis.fetch;
+  vercelRouting?: boolean;
 };
 
 type Session = {
@@ -25,13 +26,15 @@ type Session = {
 const breakdownFields = { lineItems: lineItems.optional(), adjustments: adjustments.optional() };
 const createExpense = z.strictObject({
   ...expenseFields,
+  documentType: expenseFields.documentType.default('receipt'),
   ...breakdownFields,
   scanId: z.uuid().optional(),
-}).refine(value => value.scanId === undefined || value.lineItems !== undefined);
+}).refine(value => !!(value.shopName || value.payeeName))
+  .refine(value => value.scanId === undefined || value.documentType === 'transfer' || value.lineItems !== undefined);
 const updateExpense = z.strictObject({ ...expenseFields, ...breakdownFields })
   .partial().refine(value => Object.keys(value).length > 0);
 const expenseId = z.uuid();
-const expenseSelection = 'id, shopName:shop_name, purchaseDate:purchase_date, totalPaidSatang:total_paid_satang';
+const expenseSelection = 'id, shopName:shop_name, payeeName:payee_name, documentType:document_type, purchaseDate:purchase_date, totalPaidSatang:total_paid_satang';
 const expenseDetailSelection = expenseSelection + ', lineItems:line_items, adjustments, scanId:scan_id';
 
 const expenseQuery = z.strictObject({
@@ -121,16 +124,24 @@ export function createApp(config: AppConfig) {
       .insert({ photo_sha256: fingerprint }).select('id').single();
     if (error) throw error;
     const reconciliation = reconcileReceipt(receipt);
-    const complete = createExpense.safeParse({ ...receipt, scanId: scan.id }).success;
+    const complete = createExpense.safeParse({ ...receipt, lineItems: receipt.lineItems ?? undefined, adjustments: receipt.adjustments ?? undefined, scanId: scan.id }).success;
     return res.status(201).json({
       scanId: scan.id, receipt, reconciliation,
-      readyToConfirm: complete && reconciliation.matches,
+      readyToConfirm: complete && (receipt.documentType === 'transfer' && receipt.lineItems === null || reconciliation.matches),
     });
   });
 
   app.get('/api/expenses', async (req, res) => {
     const { supabase, accessRole }: Session = res.locals.session;
-    const query = expenseQuery.safeParse(req.query);
+    const parameters = { ...req.query };
+    // Vercel adds the catch-all route parameter to its query helper. It is not
+    // a user-selected filter; keep rejecting any other unexpected parameters.
+    const routeParameter = parameters['...path'];
+    if (config.vercelRouting && (routeParameter === 'expenses'
+      || (Array.isArray(routeParameter) && routeParameter.length === 1 && routeParameter[0] === 'expenses'))) {
+      delete parameters['...path'];
+    }
+    const query = expenseQuery.safeParse(parameters);
     if (!query.success) {
       return res.status(400).json({ error: 'invalid_expense_query' });
     }
@@ -179,6 +190,8 @@ export function createApp(config: AppConfig) {
     const { supabase }: Session = res.locals.session;
     const { data, error } = await supabase.from('expenses').insert({
       shop_name: body.data.shopName,
+      payee_name: body.data.payeeName,
+      document_type: body.data.documentType,
       purchase_date: body.data.purchaseDate,
       total_paid_satang: body.data.totalPaidSatang,
       scan_id: body.data.scanId,
@@ -210,6 +223,8 @@ export function createApp(config: AppConfig) {
     const { supabase, userId }: Session = res.locals.session;
     const { data, error } = await supabase.from('expenses').update({
       shop_name: body.data.shopName,
+      payee_name: body.data.payeeName,
+      document_type: body.data.documentType,
       purchase_date: body.data.purchaseDate,
       total_paid_satang: body.data.totalPaidSatang,
       line_items: body.data.lineItems,

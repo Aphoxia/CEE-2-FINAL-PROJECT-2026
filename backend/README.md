@@ -1,6 +1,12 @@
 # Receipt Scanner backend
 
+## Transfer slips and payees
+
+Apply `20261107000004_transfer_slips.sql` after the earlier migrations. Expenses now include `documentType` (`receipt` or `transfer`) and an optional `payeeName`, separate from `shopName`. At least one of shop or payee is required. Existing expenses remain receipts. A scanned receipt requires line items; a transfer slip can be saved without a breakdown. When a breakdown is provided, its total must still reconcile. The user must check the extracted recipient and amount before saving. The existing ownership and Finance Head rules still apply.
+
 Milestones 1–4 expose personal expense management, Finance Head reporting, and receipt extraction with confirmation. Use Node.js 24 or newer.
+
+The frontend calls `ensure_member()` after sign-in to enroll the authenticated user as a regular member. Department selections are self-declared labels, separate from the protected Finance Head permission. Removing a membership alone does not permanently block a user from re-enrolling while open membership is enabled.
 
 ## Run locally
 

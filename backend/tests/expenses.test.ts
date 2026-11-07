@@ -25,7 +25,7 @@ beforeAll(async () => {
     create role anon;
     create role authenticated;
     create schema auth;
-    create table auth.users (id uuid primary key);
+    create table auth.users (id uuid primary key, raw_user_meta_data jsonb not null default '{}'::jsonb);
     create function auth.uid() returns uuid language sql stable as $$
       select (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')::uuid;
     $$;
@@ -47,6 +47,15 @@ beforeAll(async () => {
     new URL('../../supabase/migrations/20261107000003_receipt_scanning.sql', import.meta.url),
     'utf8',
   ));
+  await db.exec(await readFile(
+    new URL('../../supabase/migrations/20261107000004_transfer_slips.sql', import.meta.url),
+    'utf8',
+  ));
+  await db.exec(await readFile(
+    new URL('../../supabase/migrations/20261107000005_open_membership_departments.sql', import.meta.url),
+    'utf8',
+  ));
+  await db.exec(await readFile(new URL('../../supabase/migrations/20261108000006_member_display_names.sql', import.meta.url), 'utf8'));
   await db.query('insert into auth.users (id) values ($1), ($2), ($3), ($4), ($5)', [
     alice, bob, guest, emptyMember, may,
   ]);
@@ -54,7 +63,7 @@ beforeAll(async () => {
     "insert into public.organization_members (user_id, access_role) values ($1, 'finance_head')",
     [may],
   );
-  await db.exec("insert into public.departments (name) values ('IT'), ('BOARD')");
+  await db.exec("insert into public.departments (name) values ('IT'), ('BOARD') on conflict do nothing");
   await db.query(`
     insert into public.user_departments (user_id, department_name)
     values ($1, 'IT'), ($1, 'BOARD'), ($2, 'BOARD')
@@ -114,7 +123,7 @@ const supabaseFetch = vi.fn<typeof fetch>(async (input, init) => {
     }
     case '/rest/v1/expenses': {
       let returning = `id, shop_name as "shopName", purchase_date::text as "purchaseDate",
-        total_paid_satang as "totalPaidSatang"`;
+        total_paid_satang as "totalPaidSatang", payee_name as "payeeName", document_type as "documentType"`;
       const selection = url.searchParams.get('select') ?? '';
       if (selection === 'id') returning = 'id';
       if (selection.includes('lineItems')) {
@@ -127,7 +136,7 @@ const supabaseFetch = vi.fn<typeof fetch>(async (input, init) => {
         const body: Record<string, unknown> = await req.json();
         const columns = Object.keys(body);
         const allowed = ['shop_name', 'purchase_date', 'total_paid_satang',
-          'scan_id', 'line_items', 'adjustments'];
+          'scan_id', 'line_items', 'adjustments', 'payee_name', 'document_type'];
         if (columns.some(column => !allowed.includes(column))) {
           throw new Error('Unexpected insert column in test transport');
         }
@@ -140,7 +149,7 @@ const supabaseFetch = vi.fn<typeof fetch>(async (input, init) => {
         const body: Record<string, unknown> = await req.json();
         const columns = Object.keys(body);
         const allowedColumns = ['shop_name', 'purchase_date', 'total_paid_satang',
-          'line_items', 'adjustments'];
+          'line_items', 'adjustments', 'payee_name', 'document_type'];
         if (columns.some(column => !allowedColumns.includes(column))) {
           throw new Error('Unexpected update column in test transport');
         }
@@ -191,7 +200,49 @@ const app = createApp({
   fetch: supabaseFetch,
 });
 
+describe('member display names', () => {
+  it('initializes once, preserves edits, and protects profiles', async () => {
+    await db.query("update auth.users set raw_user_meta_data = $1::jsonb where id = any($2::uuid[])", [JSON.stringify({full_name: 'Alice Google'}), [alice, bob]]);
+    await queryAsUser(alice, 'select public.ensure_member()');
+    await queryAsUser(bob, 'select public.ensure_member()');
+    const own = await queryAsUser<{display_name: string}>(alice, 'select display_name from public.member_profiles');
+    expect(own.rows).toEqual([{ display_name: 'Alice Google' }]);
+    await queryAsUser(alice, "update public.member_profiles set display_name = 'New name' where user_id = $1", [alice]);
+    await queryAsUser(alice, 'select public.ensure_member()');
+    expect((await queryAsUser<{display_name: string}>(alice, 'select display_name from public.member_profiles')).rows[0].display_name).toBe('New name');
+    const other = await queryAsUser(alice, "update public.member_profiles set display_name = 'Changed' where user_id = $1 returning user_id", [bob]);
+    expect(other.rows).toEqual([]);
+    await expect(queryAsUser(alice, "update public.organization_members set access_role = 'finance_head' where user_id = $1", [alice])).rejects.toThrow();
+    const visible = await queryAsUser<{user_id: string}>(may, 'select user_id from public.member_profiles');
+    expect(visible.rows.map(row => row.user_id)).toEqual(expect.arrayContaining([alice, bob]));
+  });
+
+  it('uses a fallback without a Google name and keeps same-named users distinct in filtering', async () => {
+    await queryAsUser(emptyMember, 'select public.ensure_member()');
+    const fallback = await queryAsUser<{display_name: string}>(emptyMember, 'select display_name from public.member_profiles');
+    expect(fallback.rows).toEqual([{ display_name: 'ยังไม่ได้ตั้งชื่อ' }]);
+    await queryAsUser(alice, "update public.member_profiles set display_name = 'Same name' where user_id = $1", [alice]);
+    await queryAsUser(bob, "update public.member_profiles set display_name = 'Same name' where user_id = $1", [bob]);
+    const filtered = await queryAsUser<{result: {expenses: {ownerId: string}[]; runningTotalSatang: number}}>(may,
+      "select public.list_expenses('organization', $1, null, null, null, 50, 0) as result", [alice]);
+    expect(filtered.rows[0].result.expenses.every(expense => expense.ownerId === alice)).toBe(true);
+    expect(filtered.rows[0].result.runningTotalSatang).toBe(5500);
+  });
+});
+
 describe('GET /api/expenses', () => {
+  it('ignores only the Vercel catch-all route parameter on Vercel', async () => {
+    const deployedApp = createApp({
+      supabaseUrl: 'https://receipt-test.example', supabasePublishableKey: 'sb_publishable_fixture',
+      fetch: supabaseFetch, vercelRouting: true,
+    });
+    await request(deployedApp).get('/api/expenses?...path=expenses&scope=own')
+      .auth('alice-token', { type: 'bearer' }).expect(200);
+    await request(deployedApp).get('/api/expenses?...path=other')
+      .auth('alice-token', { type: 'bearer' }).expect(400);
+    await request(app).get('/api/expenses?...path=expenses')
+      .auth('alice-token', { type: 'bearer' }).expect(400);
+  });
   it('rejects missing and invalid bearer tokens', async () => {
     await request(app).get('/api/expenses').expect(401, { error: 'unauthenticated' });
     await request(app).get('/api/expenses').auth('invalid-token', { type: 'bearer' })
@@ -219,7 +270,7 @@ describe('GET /api/expenses', () => {
     expect(aliceResponse.body).toEqual({
       expenses: [{
         id: expect.any(String),
-        shopName: 'Alice shop',
+        shopName: 'Alice shop', payeeName: null, documentType: 'receipt',
         purchaseDate: '2026-11-07',
         totalPaidSatang: 4500,
       }],
@@ -319,6 +370,32 @@ describe('GET /api/expenses', () => {
 });
 
 describe('database permissions without Express', () => {
+  it('enrolls a signed-in user as a member and restricts department edits to themselves', async () => {
+    try {
+      await queryAsUser(guest, 'select public.ensure_member()');
+      await queryAsUser(guest, 'select public.ensure_member()');
+      await queryAsUser(may, 'select public.ensure_member()');
+      const finance = await queryAsUser(may, 'select access_role from public.organization_members');
+      expect(finance.rows).toEqual([{ access_role: 'finance_head' }]);
+      const membership = await queryAsUser(guest, 'select access_role from public.organization_members');
+      expect(membership.rows).toEqual([{ access_role: 'member' }]);
+      await expect(queryAsUser(guest, "update public.organization_members set access_role = 'finance_head' where user_id = $1", [guest]))
+        .rejects.toMatchObject({ code: '42501' });
+      await queryAsUser(guest, "insert into public.user_departments (user_id, department_name) values ($1, 'IT')", [guest]);
+      await queryAsUser(guest, "insert into public.user_departments (user_id, department_name) values ($1, 'FINANCE')", [guest]);
+      const unchangedRole = await queryAsUser(guest, 'select access_role from public.organization_members');
+      expect(unchangedRole.rows).toEqual([{ access_role: 'member' }]);
+      await expect(queryAsUser(guest, "insert into public.user_departments (user_id, department_name) values ($1, 'FINANCE')", [bob]))
+        .rejects.toMatchObject({ code: '42501' });
+      const removed = await queryAsUser(guest, 'delete from public.user_departments where user_id = $1 returning user_id', [bob]);
+      expect(removed.rows).toEqual([]);
+      await request(app).get('/api/expenses').auth('guest-token', { type: 'bearer' }).expect(200);
+    } finally {
+      await db.query('delete from public.user_departments where user_id = $1', [guest]);
+      await db.query('delete from public.organization_members where user_id = $1', [guest]);
+    }
+  });
+
   it('shows each member only their own rows, including when they query a different owner', async () => {
     const aliceRows = await queryAsUser(alice, 'select distinct owner_id from public.expenses');
     const bobRows = await queryAsUser(bob, 'select distinct owner_id from public.expenses');
@@ -378,7 +455,7 @@ describe('database permissions without Express', () => {
 });
 
 describe('expense writes', () => {
-  const fields = { shopName: 'ร้านทดสอบ', purchaseDate: '2026-11-07', totalPaidSatang: 4500 };
+  const fields = { documentType: 'receipt', payeeName: null, shopName: 'ร้านทดสอบ', purchaseDate: '2026-11-07', totalPaidSatang: 4500 };
 
   it('creates, partially updates and deletes an owned expense, updating the running total', async () => {
     const created = await request(app).post('/api/expenses')
@@ -526,6 +603,7 @@ describe('receipt scan and confirmation', () => {
     'base64',
   );
   const receipt = {
+    documentType: 'receipt', payeeName: null,
     shopName: 'ร้านทดสอบ',
     purchaseDate: '2026-11-07',
     totalPaidSatang: 4500,
@@ -587,6 +665,27 @@ describe('receipt scan and confirmation', () => {
       .auth('alice-token', { type: 'bearer' }).expect(404);
     await request(scanApp).get(`/api/expenses/${saved.body.id}`)
       .auth('may-token', { type: 'bearer' }).expect(200);
+  });
+
+  it('scans and saves an itemless transfer with a separate payee and preserves ownership', async () => {
+    const slip = { documentType: 'transfer', shopName: null, payeeName: 'Recipient Test',
+      purchaseDate: '2026-11-07', totalPaidSatang: 25000, lineItems: null, adjustments: null };
+    geminiFetch.mockImplementation(async () => Response.json({
+      candidates: [{ finishReason: 'STOP', content: { parts: [{ text: JSON.stringify(slip) }] } }],
+    }));
+    const scanned = await scan().expect(201);
+    expect(scanned.body).toMatchObject({ receipt: slip, readyToConfirm: true });
+    const saved = await request(scanApp).post('/api/expenses').auth('empty-member-token', { type: 'bearer' })
+      .send({ documentType: 'transfer', payeeName: 'Recipient Test', purchaseDate: slip.purchaseDate,
+        totalPaidSatang: slip.totalPaidSatang, scanId: scanned.body.scanId }).expect(201);
+    const detail = await request(scanApp).get(`/api/expenses/${saved.body.id}`)
+      .auth('empty-member-token', { type: 'bearer' }).expect(200);
+    expect(detail.body).toMatchObject({ shopName: null, payeeName: 'Recipient Test', documentType: 'transfer', lineItems: null });
+    const listed = await request(scanApp).get('/api/expenses').auth('empty-member-token', { type: 'bearer' }).expect(200);
+    expect(listed.body.expenses[0]).toMatchObject({ payeeName: 'Recipient Test', documentType: 'transfer' });
+    await request(scanApp).get(`/api/expenses/${saved.body.id}`).auth('alice-token', { type: 'bearer' }).expect(404);
+    await request(scanApp).post('/api/expenses').auth('empty-member-token', { type: 'bearer' })
+      .send({ documentType: 'transfer', purchaseDate: slip.purchaseDate, totalPaidSatang: 25000 }).expect(400);
   });
 
   it('allows correction of missing fields and flags a mismatch without inventing adjustments', async () => {

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { extractReceipt, matchesImage, reconcileReceipt } from '../src/receipt.ts';
 
 const receipt = {
+  documentType: 'receipt', payeeName: null,
   shopName: 'ร้านทดสอบ',
   purchaseDate: '2026-11-07',
   totalPaidSatang: 4500,
@@ -48,6 +49,14 @@ describe('receipt extraction', () => {
     });
   });
 
+  it('preserves negative printed rows as adjustments for review', async () => {
+    const raw = { ...receipt, lineItems: [...receipt.lineItems, { description: 'Credit note', amountSatang: -500 }], adjustments: [] };
+    const extracted = await extractReceipt(png, 'image/png', 'test-key', 'gemini-test', async () => providerResult(raw));
+    expect(extracted.lineItems).toEqual(receipt.lineItems);
+    expect(extracted.adjustments).toEqual([{ description: 'Credit note', amountSatang: -500 }]);
+    expect(reconcileReceipt(extracted).matches).toBe(true);
+  });
+
   it('rejects quota errors, provider failures, truncation, malformed responses and invalid amounts', async () => {
     const responses = [
       { response: new Response('', { status: 429 }), status: 429 },
@@ -56,8 +65,6 @@ describe('receipt extraction', () => {
       { response: Response.json({ candidates: [] }), status: 502 },
       { response: new Response('invalid JSON'), status: 502 },
       { response: providerResult({ ...receipt, totalPaidSatang: 1.5 }), status: 502 },
-      { response: providerResult({ ...receipt, lineItems: [{ description: 'A', amountSatang: -1 }] }),
-        status: 502 },
     ];
     for (const { response, status } of responses) {
       await expect(extractReceipt(png, 'image/png', 'test-key', 'gemini-test', async () => response))
