@@ -14,7 +14,13 @@ The same user submits the exact same receipt photo again while the expense saved
 A receipt scan with one or more missing or unusable purchase details. It becomes an expense once the user supplies the missing details and saves it.
 
 **Expense**:
-A saved record of a purchase owned by one user, with a shop name, purchase date, and total paid in THB. A detailed expense also contains line items and receipt adjustments.
+A saved record owned by one user, with a document type, date and total paid in THB. It has a shop name or payee name (or both). A detailed receipt also contains line items and receipt adjustments.
+
+**Transfer slip**:
+Evidence of a bank transfer. It can identify the recipient without identifying a shop, and may have no item breakdown. The user reviews extracted information before saving.
+
+**Payee**:
+The recipient of the payment or transfer. A payee's account name can differ from the shop name.
 
 **Total paid**:
 The final amount charged for the purchase, after any discounts and including any tax or fees charged.

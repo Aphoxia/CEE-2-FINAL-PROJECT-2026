@@ -47,6 +47,10 @@ beforeAll(async () => {
     new URL('../../supabase/migrations/20261107000003_receipt_scanning.sql', import.meta.url),
     'utf8',
   ));
+  await db.exec(await readFile(
+    new URL('../../supabase/migrations/20261107000004_transfer_slips.sql', import.meta.url),
+    'utf8',
+  ));
   await db.query('insert into auth.users (id) values ($1), ($2), ($3), ($4), ($5)', [
     alice, bob, guest, emptyMember, may,
   ]);
@@ -114,7 +118,7 @@ const supabaseFetch = vi.fn<typeof fetch>(async (input, init) => {
     }
     case '/rest/v1/expenses': {
       let returning = `id, shop_name as "shopName", purchase_date::text as "purchaseDate",
-        total_paid_satang as "totalPaidSatang"`;
+        total_paid_satang as "totalPaidSatang", payee_name as "payeeName", document_type as "documentType"`;
       const selection = url.searchParams.get('select') ?? '';
       if (selection === 'id') returning = 'id';
       if (selection.includes('lineItems')) {
@@ -127,7 +131,7 @@ const supabaseFetch = vi.fn<typeof fetch>(async (input, init) => {
         const body: Record<string, unknown> = await req.json();
         const columns = Object.keys(body);
         const allowed = ['shop_name', 'purchase_date', 'total_paid_satang',
-          'scan_id', 'line_items', 'adjustments'];
+          'scan_id', 'line_items', 'adjustments', 'payee_name', 'document_type'];
         if (columns.some(column => !allowed.includes(column))) {
           throw new Error('Unexpected insert column in test transport');
         }
@@ -140,7 +144,7 @@ const supabaseFetch = vi.fn<typeof fetch>(async (input, init) => {
         const body: Record<string, unknown> = await req.json();
         const columns = Object.keys(body);
         const allowedColumns = ['shop_name', 'purchase_date', 'total_paid_satang',
-          'line_items', 'adjustments'];
+          'line_items', 'adjustments', 'payee_name', 'document_type'];
         if (columns.some(column => !allowedColumns.includes(column))) {
           throw new Error('Unexpected update column in test transport');
         }
@@ -219,7 +223,7 @@ describe('GET /api/expenses', () => {
     expect(aliceResponse.body).toEqual({
       expenses: [{
         id: expect.any(String),
-        shopName: 'Alice shop',
+        shopName: 'Alice shop', payeeName: null, documentType: 'receipt',
         purchaseDate: '2026-11-07',
         totalPaidSatang: 4500,
       }],
@@ -378,7 +382,7 @@ describe('database permissions without Express', () => {
 });
 
 describe('expense writes', () => {
-  const fields = { shopName: 'ร้านทดสอบ', purchaseDate: '2026-11-07', totalPaidSatang: 4500 };
+  const fields = { documentType: 'receipt', payeeName: null, shopName: 'ร้านทดสอบ', purchaseDate: '2026-11-07', totalPaidSatang: 4500 };
 
   it('creates, partially updates and deletes an owned expense, updating the running total', async () => {
     const created = await request(app).post('/api/expenses')
@@ -526,6 +530,7 @@ describe('receipt scan and confirmation', () => {
     'base64',
   );
   const receipt = {
+    documentType: 'receipt', payeeName: null,
     shopName: 'ร้านทดสอบ',
     purchaseDate: '2026-11-07',
     totalPaidSatang: 4500,
@@ -587,6 +592,27 @@ describe('receipt scan and confirmation', () => {
       .auth('alice-token', { type: 'bearer' }).expect(404);
     await request(scanApp).get(`/api/expenses/${saved.body.id}`)
       .auth('may-token', { type: 'bearer' }).expect(200);
+  });
+
+  it('scans and saves an itemless transfer with a separate payee and preserves ownership', async () => {
+    const slip = { documentType: 'transfer', shopName: null, payeeName: 'Recipient Test',
+      purchaseDate: '2026-11-07', totalPaidSatang: 25000, lineItems: null, adjustments: null };
+    geminiFetch.mockImplementation(async () => Response.json({
+      candidates: [{ finishReason: 'STOP', content: { parts: [{ text: JSON.stringify(slip) }] } }],
+    }));
+    const scanned = await scan().expect(201);
+    expect(scanned.body).toMatchObject({ receipt: slip, readyToConfirm: true });
+    const saved = await request(scanApp).post('/api/expenses').auth('empty-member-token', { type: 'bearer' })
+      .send({ documentType: 'transfer', payeeName: 'Recipient Test', purchaseDate: slip.purchaseDate,
+        totalPaidSatang: slip.totalPaidSatang, scanId: scanned.body.scanId }).expect(201);
+    const detail = await request(scanApp).get(`/api/expenses/${saved.body.id}`)
+      .auth('empty-member-token', { type: 'bearer' }).expect(200);
+    expect(detail.body).toMatchObject({ shopName: null, payeeName: 'Recipient Test', documentType: 'transfer', lineItems: null });
+    const listed = await request(scanApp).get('/api/expenses').auth('empty-member-token', { type: 'bearer' }).expect(200);
+    expect(listed.body.expenses[0]).toMatchObject({ payeeName: 'Recipient Test', documentType: 'transfer' });
+    await request(scanApp).get(`/api/expenses/${saved.body.id}`).auth('alice-token', { type: 'bearer' }).expect(404);
+    await request(scanApp).post('/api/expenses').auth('empty-member-token', { type: 'bearer' })
+      .send({ documentType: 'transfer', purchaseDate: slip.purchaseDate, totalPaidSatang: 25000 }).expect(400);
   });
 
   it('allows correction of missing fields and flags a mismatch without inventing adjustments', async () => {
