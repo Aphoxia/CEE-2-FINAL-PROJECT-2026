@@ -4,6 +4,6 @@
   "type": "module",
   "engines": { "node": "24.x" },
   "scripts": {
-    "build": "npm ci --prefix backend && npm ci --prefix frontend && npm run build --prefix frontend"
+    "build": "npm ci --omit=dev --prefix backend && npm ci --prefix frontend && npm run build --prefix frontend"
   }
 }

@@ -3,5 +3,5 @@
   "framework": null,
   "buildCommand": "npm run build",
   "outputDirectory": "frontend/dist",
-  "functions": { "api/[...path].ts": { "maxDuration": 60 } }
+  "functions": { "api/[...path].ts": { "maxDuration": 60, "includeFiles": "backend/**" } }
 }
