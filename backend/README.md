@@ -1,6 +1,6 @@
 # Receipt Scanner backend
 
-Milestones 1–3 expose personal expense management and Finance Head reporting. Use Node.js 24 or newer.
+Milestones 1–4 expose personal expense management, Finance Head reporting, and receipt extraction with confirmation. Use Node.js 24 or newer.
 
 ## Run locally
 
@@ -88,9 +88,81 @@ ownership for writes, including requests made directly to Supabase.
 
 PATCH and DELETE return `404` when there is no matching owned expense.
 Malformed JSON returns `400`; JSON bodies over 16 KB return `413`.
-New POST requests create separate expense records. Exact receipt-photo duplicate
-detection and line-item reconciliation belong to the scan-and-confirm milestone.
+Manual POST requests create separate expense records. Scanned expenses use a
+photo fingerprint to prevent duplicate saves for the same owner.
+
+## Scan, review and confirm a receipt
+
+Apply `20261107000003_receipt_scanning.sql` after the earlier migrations.
+Add `GEMINI_API_KEY` to the backend's ignored `.env` file. The default model is
+`gemini-3.5-flash-lite`, matching the existing demo. Set `GEMINI_MODEL` to use
+another compatible model. Existing expense routes can run without a Gemini key;
+the scan route returns `503` until a key is configured.
+
+1. Send a JPEG, PNG or WebP image as the raw HTTP body. The API checks its MIME
+   type, magic bytes, and a 4 MiB upload limit.
+
+   ```sh
+   curl -X POST -H "Authorization: Bearer ${RECEIPT_TEST_ACCESS_TOKEN}" \
+     -H 'Content-Type: image/jpeg' --data-binary @receipt.jpg \
+     http://127.0.0.1:3000/api/scans
+   ```
+
+2. A successful `201` response contains `scanId`, `receipt`, `reconciliation`
+   and `readyToConfirm`. No expense is saved yet. Null fields need correction.
+   `differenceSatang` is the printed total minus the calculated total, or null
+   when amounts are incomplete. `readyToConfirm` indicates complete fields and
+   matching arithmetic; the user still reviews the extraction before saving.
+
+3. Send the reviewed fields and `scanId` to `POST /api/expenses`.
+
+   ```json
+   {
+     "scanId": "<scan-uuid>",
+     "shopName": "ร้านตัวอย่าง",
+     "purchaseDate": "2026-11-07",
+     "totalPaidSatang": 4500,
+     "lineItems": [
+       { "description": "สินค้า A", "amountSatang": 2000 },
+       { "description": "สินค้า B", "amountSatang": 3000 }
+     ],
+     "adjustments": [
+       { "description": "ส่วนลดท้ายใบ", "amountSatang": -500 }
+     ]
+   }
+   ```
+
+4. `GET /api/expenses/:id` returns the saved header, `lineItems`, `adjustments`
+   and `scanId`. Owners and Finance Head can read saved details. Lists and
+   summaries continue to count the final receipt total once.
+
+Line amounts include quantity and any item-level discount. Adjustments represent
+receipt-level changes excluded from line amounts, such as a negative discount or
+a positive fee. Tax already included in item prices is excluded from adjustments.
+The API flags mismatches for correction and never invents a balancing adjustment.
+There can be 1–100 items and 0–20 adjustments, each with a 1–200 character
+description and integer satang amount. Item amounts are nonnegative.
+
+Detailed expenses must satisfy `sum(lineItems) + sum(adjustments) = totalPaidSatang`.
+PostgreSQL checks the complete row on inserts and updates, including direct
+Supabase writes. PATCH can replace either array. When changing a total and its
+breakdown, send both in the same PATCH. A mismatch returns `422` and leaves the
+saved row intact. Legacy expenses without a breakdown remain readable and editable.
+
+The app keeps the image transient while sending it to Gemini. Stored scan metadata
+contains a UUID, owner, SHA-256 fingerprint and creation time. Users can read only
+their own scan metadata. Finance Head reads confirmed expenses.
+Fingerprints identify exact image bytes per owner. Separate photos of the same
+purchase can be saved separately. A unique database index makes concurrent
+duplicate confirmations return one `201` and one `409`. Re-uploading an already
+saved photo returns `409` before another Gemini call. Deleting the expense allows
+that photo to be saved again.
+
+Gemini calls time out after 45 seconds. Quota errors return `429`; failed, blocked,
+truncated or invalid extractions return `502`. Uploads with unsupported MIME
+types return `415`, invalid signatures return `400`, and oversized bodies
+return `413`. Provider diagnostics and keys are excluded from API responses.
 
 ## Run the tests
 
-Run `npm test` and `npm run typecheck` from this directory. Supertest calls the Express app on a loopback port. The suite applies the migration to PGlite and runs the database queries as separate users. It uses a simulated Supabase HTTP service for authentication and the Data API, so the suite runs without project credentials.
+Run `npm test` and `npm run typecheck` from this directory. Supertest calls the Express app on a loopback port. The suite applies the migrations to PGlite and runs the database queries as separate users. It uses simulated Supabase Auth, Data API and Gemini HTTP services, so the suite runs without project credentials. These tests cover local PostgreSQL rules and API behavior. Live Supabase configuration, Google sign-in and Gemini extraction quality require separate integration checks.
