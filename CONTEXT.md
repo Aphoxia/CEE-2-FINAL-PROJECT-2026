@@ -14,7 +14,7 @@ The same user submits the exact same receipt photo again while the expense saved
 A receipt scan with one or more missing or unusable purchase details. It becomes an expense once the user supplies the missing details and saves it.
 
 **Expense**:
-A saved record of a purchase owned by one user, with a shop name, purchase date, and total paid in THB. The user can correct or delete it.
+A saved record of a purchase owned by one user, with a shop name, purchase date, and total paid in THB. A detailed expense also contains line items and receipt adjustments.
 
 **Total paid**:
 The final amount charged for the purchase, after any discounts and including any tax or fees charged.
@@ -33,3 +33,12 @@ A member with permission to read all retained team expenses and their summaries.
 
 **Department**:
 A descriptive team label such as IT or BOARD. A user may belong to multiple departments, independently of Finance Head permissions.
+
+**Line item**
+A purchased item or group of identical items on a receipt, with a description and the full line amount after any item-level discount.
+
+**Receipt adjustment**
+A change to the receipt total excluded from the line amounts, such as a receipt-wide discount or an additional fee. Discounts are negative, while additional charges are positive.
+
+**Reconciled receipt**
+A receipt whose line amounts plus receipt adjustments equal the total paid exactly.

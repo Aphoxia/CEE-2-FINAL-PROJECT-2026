@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { PGlite } from '@electric-sql/pglite';
 import request from 'supertest';
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/app.ts';
 
 const alice = '00000000-0000-4000-8000-000000000001';
@@ -41,6 +41,10 @@ beforeAll(async () => {
   ));
   await db.exec(await readFile(
     new URL('../../supabase/migrations/20261107000002_expense_writes.sql', import.meta.url),
+    'utf8',
+  ));
+  await db.exec(await readFile(
+    new URL('../../supabase/migrations/20261107000003_receipt_scanning.sql', import.meta.url),
     'utf8',
   ));
   await db.query('insert into auth.users (id) values ($1), ($2), ($3), ($4), ($5)', [
@@ -89,7 +93,8 @@ const supabaseFetch = vi.fn<typeof fetch>(async (input, init) => {
     return Response.json({ code: 'bad_jwt', message: 'Invalid token' }, { status: 401 });
   }
 
-  switch (url.pathname) {
+  try {
+    switch (url.pathname) {
     case '/auth/v1/user':
       return Response.json({ id: userId, aud: 'authenticated' });
     case '/rest/v1/organization_members': {
@@ -108,21 +113,34 @@ const supabaseFetch = vi.fn<typeof fetch>(async (input, init) => {
       return Response.json(rows[0].result);
     }
     case '/rest/v1/expenses': {
-      const returning = `id, shop_name as "shopName", purchase_date::text as "purchaseDate",
+      let returning = `id, shop_name as "shopName", purchase_date::text as "purchaseDate",
         total_paid_satang as "totalPaidSatang"`;
+      const selection = url.searchParams.get('select') ?? '';
+      if (selection === 'id') returning = 'id';
+      if (selection.includes('lineItems')) {
+        returning += ', line_items as "lineItems", adjustments, scan_id as "scanId"';
+      }
       let result;
       const id = url.searchParams.get('id')?.replace(/^eq\./, '');
       const ownerId = url.searchParams.get('owner_id')?.replace(/^eq\./, '');
       if (req.method === 'POST') {
-        const body = await req.json();
+        const body: Record<string, unknown> = await req.json();
+        const columns = Object.keys(body);
+        const allowed = ['shop_name', 'purchase_date', 'total_paid_satang',
+          'scan_id', 'line_items', 'adjustments'];
+        if (columns.some(column => !allowed.includes(column))) {
+          throw new Error('Unexpected insert column in test transport');
+        }
+        const placeholders = columns.map((_column, index) => `$${index + 1}`);
         result = await queryAsUser(userId, `
-          insert into public.expenses (shop_name, purchase_date, total_paid_satang)
-          values ($1, $2, $3) returning ${returning}
-        `, [body.shop_name, body.purchase_date, body.total_paid_satang]);
+          insert into public.expenses (${columns.join(', ')})
+          values (${placeholders.join(', ')}) returning ${returning}
+        `, Object.values(body).map(value => Array.isArray(value) ? JSON.stringify(value) : value));
       } else if (req.method === 'PATCH') {
         const body: Record<string, unknown> = await req.json();
         const columns = Object.keys(body);
-        const allowedColumns = ['shop_name', 'purchase_date', 'total_paid_satang'];
+        const allowedColumns = ['shop_name', 'purchase_date', 'total_paid_satang',
+          'line_items', 'adjustments'];
         if (columns.some(column => !allowedColumns.includes(column))) {
           throw new Error('Unexpected update column in test transport');
         }
@@ -130,11 +148,19 @@ const supabaseFetch = vi.fn<typeof fetch>(async (input, init) => {
         result = await queryAsUser(userId, `
           update public.expenses set ${assignments.join(', ')}
           where id = $1 and owner_id = $2 returning ${returning}
-        `, [id, ownerId, ...Object.values(body)]);
+        `, [id, ownerId,
+          ...Object.values(body).map(value => Array.isArray(value) ? JSON.stringify(value) : value)]);
       } else if (req.method === 'DELETE') {
         result = await queryAsUser(userId, `
           delete from public.expenses where id = $1 and owner_id = $2 returning id
         `, [id, ownerId]);
+      } else if (req.method === 'GET') {
+        const hash = url.searchParams.get('photo_sha256')?.replace(/^eq\./, '');
+        result = await queryAsUser(userId, `
+          select ${returning} from public.expenses
+          where ($1::uuid is null or id = $1) and ($2::uuid is null or owner_id = $2)
+            and ($3::text is null or photo_sha256 = $3)
+        `, [id ?? null, ownerId ?? null, hash ?? null]);
       } else {
         throw new Error('Unexpected expense request method');
       }
@@ -142,8 +168,20 @@ const supabaseFetch = vi.fn<typeof fetch>(async (input, init) => {
         ? result.rows[0] : result.rows;
       return Response.json(data, { status: req.method === 'POST' ? 201 : 200 });
     }
+    case '/rest/v1/receipt_scans': {
+      const body = await req.json();
+      const result = await queryAsUser(userId, `
+        insert into public.receipt_scans (photo_sha256) values ($1) returning id
+      `, [body.photo_sha256]);
+      return Response.json(result.rows[0], { status: 201 });
+    }
     default:
       throw new Error(`Unexpected test request to ${url.pathname}`);
+    }
+  } catch (error) {
+    const failure = error as { code?: string; message: string };
+    if (!failure.code) throw error;
+    return Response.json({ code: failure.code, message: failure.message }, { status: 400 });
   }
 });
 
@@ -479,5 +517,196 @@ describe('expense writes', () => {
     } finally {
       await db.query('delete from public.expenses where id = $1', [created.body.id]);
     }
+  });
+});
+
+describe('receipt scan and confirmation', () => {
+  const png = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+    'base64',
+  );
+  const receipt = {
+    shopName: 'ร้านทดสอบ',
+    purchaseDate: '2026-11-07',
+    totalPaidSatang: 4500,
+    lineItems: [
+      { description: 'A', amountSatang: 2000 },
+      { description: 'B', amountSatang: 3000 },
+    ],
+    adjustments: [{ description: 'ส่วนลดท้ายใบ', amountSatang: -500 }],
+  };
+  const geminiFetch = vi.fn<typeof fetch>();
+  const scanApp = createApp({
+    supabaseUrl: 'https://receipt-test.example',
+    supabasePublishableKey: 'sb_publishable_fixture',
+    fetch: supabaseFetch,
+    geminiApiKey: 'test-gemini-key',
+    geminiFetch,
+  });
+
+  beforeEach(() => {
+    geminiFetch.mockReset();
+    geminiFetch.mockImplementation(async () => Response.json({
+      candidates: [{ finishReason: 'STOP', content: { parts: [{ text: JSON.stringify(receipt) }] } }],
+    }));
+  });
+
+  afterEach(async () => {
+    await db.exec('delete from public.expenses where scan_id is not null');
+    await db.query('delete from public.expenses where owner_id = $1', [emptyMember]);
+    await db.exec('delete from public.receipt_scans');
+  });
+
+  function scan(token = 'empty-member-token') {
+    return request(scanApp).post('/api/scans').auth(token, { type: 'bearer' })
+      .set('Content-Type', 'image/png').send(png);
+  }
+
+  it('returns a reviewable draft and saves the confirmed breakdown without retaining image bytes', async () => {
+    const scanned = await scan().expect(201);
+    expect(scanned.body).toMatchObject({
+      scanId: expect.any(String), receipt, readyToConfirm: true,
+      reconciliation: { calculatedTotalSatang: 4500, differenceSatang: 0, matches: true },
+    });
+    const before = await queryAsUser(emptyMember, 'select id from public.expenses');
+    expect(before.rows).toEqual([]);
+    const metadata = await queryAsUser<Record<string, unknown>>(emptyMember,
+      'select * from public.receipt_scans');
+    expect(Object.keys(metadata.rows[0]).sort()).toEqual([
+      'created_at', 'id', 'owner_id', 'photo_sha256',
+    ]);
+    const saved = await request(scanApp).post('/api/expenses')
+      .auth('empty-member-token', { type: 'bearer' })
+      .send({ ...receipt, scanId: scanned.body.scanId }).expect(201);
+    const detail = await request(scanApp).get(`/api/expenses/${saved.body.id}`)
+      .auth('empty-member-token', { type: 'bearer' }).expect(200);
+    expect(detail.body).toEqual({
+      id: saved.body.id, ...receipt, scanId: scanned.body.scanId,
+    });
+    await request(scanApp).get(`/api/expenses/${saved.body.id}`)
+      .auth('alice-token', { type: 'bearer' }).expect(404);
+    await request(scanApp).get(`/api/expenses/${saved.body.id}`)
+      .auth('may-token', { type: 'bearer' }).expect(200);
+  });
+
+  it('allows correction of missing fields and flags a mismatch without inventing adjustments', async () => {
+    geminiFetch.mockImplementation(async () => Response.json({
+      candidates: [{ finishReason: 'STOP', content: { parts: [{
+        text: JSON.stringify({ ...receipt, shopName: null, purchaseDate: null, adjustments: [] }),
+      }] } }],
+    }));
+    const scanned = await scan().expect(201);
+    expect(scanned.body).toMatchObject({
+      readyToConfirm: false,
+      receipt: { shopName: null, purchaseDate: null, adjustments: [] },
+      reconciliation: { calculatedTotalSatang: 5000, differenceSatang: -500, matches: false },
+    });
+    await request(scanApp).post('/api/expenses')
+      .auth('empty-member-token', { type: 'bearer' })
+      .send({ ...scanned.body.receipt, scanId: scanned.body.scanId }).expect(400);
+    await request(scanApp).post('/api/expenses')
+      .auth('empty-member-token', { type: 'bearer' })
+      .send({ ...receipt, adjustments: [], scanId: scanned.body.scanId }).expect(422);
+    await request(scanApp).post('/api/expenses')
+      .auth('empty-member-token', { type: 'bearer' })
+      .send({ ...receipt, scanId: scanned.body.scanId }).expect(201);
+  });
+
+  it('guards concurrent confirmations and detects later duplicate uploads before invoking Gemini', async () => {
+    const first = await scan().expect(201);
+    const second = await scan().expect(201);
+    const saved = await Promise.all([first, second].map(result =>
+      request(scanApp).post('/api/expenses').auth('empty-member-token', { type: 'bearer' })
+        .send({ ...receipt, scanId: result.body.scanId })));
+    expect(saved.map(result => result.status).sort()).toEqual([201, 409]);
+    expect(saved.find(result => result.status === 409)?.body).toEqual({ error: 'duplicate_receipt' });
+    expect(geminiFetch).toHaveBeenCalledTimes(2);
+    await scan().expect(409, { error: 'duplicate_receipt' });
+    expect(geminiFetch).toHaveBeenCalledTimes(2);
+    const rows = await queryAsUser(emptyMember, 'select id from public.expenses');
+    expect(rows.rows).toHaveLength(1);
+  });
+
+  it('allows the same photo for different owners and after its saved expense is deleted', async () => {
+    const first = await scan().expect(201);
+    const saved = await request(scanApp).post('/api/expenses')
+      .auth('empty-member-token', { type: 'bearer' })
+      .send({ ...receipt, scanId: first.body.scanId }).expect(201);
+    const bobScan = await scan('bob-token').expect(201);
+    await request(scanApp).post('/api/expenses').auth('bob-token', { type: 'bearer' })
+      .send({ ...receipt, scanId: bobScan.body.scanId }).expect(201);
+    await request(scanApp).delete(`/api/expenses/${saved.body.id}`)
+      .auth('empty-member-token', { type: 'bearer' }).expect(204);
+    const again = await scan().expect(201);
+    await request(scanApp).post('/api/expenses').auth('empty-member-token', { type: 'bearer' })
+      .send({ ...receipt, scanId: again.body.scanId }).expect(201);
+  });
+
+  it('blocks foreign scan IDs and requires complete item data at confirmation', async () => {
+    const scanned = await scan().expect(201);
+    await request(scanApp).post('/api/expenses').auth('alice-token', { type: 'bearer' })
+      .send({ ...receipt, scanId: scanned.body.scanId }).expect(403);
+    const { lineItems: _items, adjustments: _adjustments, ...header } = receipt;
+    await request(scanApp).post('/api/expenses')
+      .auth('empty-member-token', { type: 'bearer' })
+      .send({ ...header, scanId: scanned.body.scanId }).expect(400);
+    for (const user of [alice, may, guest]) {
+      const otherScans = await queryAsUser(user, 'select id from public.receipt_scans');
+      expect(otherScans.rows).toEqual([]);
+    }
+  });
+
+  it('keeps corrections reconciled, including when requests go directly to PostgreSQL', async () => {
+    const scanned = await scan().expect(201);
+    const saved = await request(scanApp).post('/api/expenses')
+      .auth('empty-member-token', { type: 'bearer' })
+      .send({ ...receipt, scanId: scanned.body.scanId }).expect(201);
+    await request(scanApp).patch(`/api/expenses/${saved.body.id}`)
+      .auth('empty-member-token', { type: 'bearer' })
+      .send({ totalPaidSatang: 5000 }).expect(422);
+    await expect(queryAsUser(emptyMember, `
+      update public.expenses set total_paid_satang = 5000 where id = $1
+    `, [saved.body.id])).rejects.toMatchObject({ code: '23514' });
+    const unchanged = await request(scanApp).get(`/api/expenses/${saved.body.id}`)
+      .auth('empty-member-token', { type: 'bearer' }).expect(200);
+    expect(unchanged.body.totalPaidSatang).toBe(4500);
+    await request(scanApp).patch(`/api/expenses/${saved.body.id}`)
+      .auth('empty-member-token', { type: 'bearer' })
+      .send({ totalPaidSatang: 5000, adjustments: [] }).expect(200);
+    await expect(queryAsUser(emptyMember, `
+      update public.expenses set line_items = '[]'::jsonb where id = $1
+    `, [saved.body.id])).rejects.toMatchObject({ code: '23514' });
+  });
+
+  it('rejects invalid uploads and requires active membership before scanning', async () => {
+    await request(scanApp).post('/api/scans').set('Content-Type', 'image/png').send(png).expect(401);
+    await scan('guest-token').expect(403);
+    await request(scanApp).post('/api/scans').auth('empty-member-token', { type: 'bearer' })
+      .set('Content-Type', 'application/pdf').send(png).expect(415);
+    await request(scanApp).post('/api/scans').auth('empty-member-token', { type: 'bearer' })
+      .set('Content-Type', 'image/png').send(Buffer.from('Not an image')).expect(400);
+    await request(scanApp).post('/api/scans').auth('empty-member-token', { type: 'bearer' })
+      .set('Content-Type', 'image/png').send(Buffer.alloc(4 * 1024 * 1024 + 1)).expect(413);
+    expect(geminiFetch).not.toHaveBeenCalled();
+  });
+
+  it('returns safe errors for missing configuration and Gemini failures without creating scan metadata', async () => {
+    await request(app).post('/api/scans').auth('empty-member-token', { type: 'bearer' })
+      .set('Content-Type', 'image/png').send(png).expect(503);
+    geminiFetch.mockImplementation(async () => new Response('private error', { status: 429 }));
+    await scan().expect(429, { error: 'gemini_quota_exceeded' });
+    geminiFetch.mockImplementation(async () => new Response('private error', { status: 500 }));
+    await scan().expect(502, { error: 'receipt_extraction_failed' });
+    const rows = await queryAsUser(emptyMember, 'select id from public.receipt_scans');
+    expect(rows.rows).toEqual([]);
+  });
+
+  it('keeps legacy expense details readable with no line-item breakdown', async () => {
+    const existing = await db.query<{ id: string }>(
+      "select id from public.expenses where shop_name = 'Alice shop'",
+    );
+    const detail = await request(scanApp).get(`/api/expenses/${existing.rows[0].id}`)
+      .auth('alice-token', { type: 'bearer' }).expect(200);
+    expect(detail.body).toMatchObject({ lineItems: null, adjustments: [], scanId: null });
   });
 });
