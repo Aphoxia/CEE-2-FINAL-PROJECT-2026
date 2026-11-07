@@ -56,6 +56,7 @@ beforeAll(async () => {
     'utf8',
   ));
   await db.exec(await readFile(new URL('../../supabase/migrations/20261108000006_member_display_names.sql', import.meta.url), 'utf8'));
+  await db.exec(await readFile(new URL('../../supabase/migrations/20261108000007_calendar_filters.sql', import.meta.url), 'utf8'));
   await db.query('insert into auth.users (id) values ($1), ($2), ($3), ($4), ($5)', [
     alice, bob, guest, emptyMember, may,
   ]);
@@ -112,12 +113,12 @@ const supabaseFetch = vi.fn<typeof fetch>(async (input, init) => {
         'select user_id, access_role from public.organization_members where user_id = $1', [requestedUser]);
       return Response.json(rows);
     }
-    case '/rest/v1/rpc/list_expenses': {
+    case '/rest/v1/rpc/list_expenses_calendar': {
       const args = await req.json();
       const { rows } = await queryAsUser<{ result: unknown }>(
-        userId, 'select public.list_expenses($1, $2, $3, $4, $5, $6, $7) as result',
+        userId, 'select public.list_expenses_calendar($1, $2, $3, $4, $5, $6, $7, $8) as result',
         [args.requested_scope, args.filter_owner_id, args.filter_department,
-          args.filter_year, args.filter_month, args.page_limit, args.page_offset],
+          args.filter_year, args.filter_month, args.filter_day, args.page_limit, args.page_offset],
       );
       return Response.json(rows[0].result);
     }
@@ -339,8 +340,22 @@ describe('GET /api/expenses', () => {
     expect(response.body.totalCount).toBe(0);
   });
 
+  it('filters a month across years and an exact calendar date with correct totals and authorization', async () => {
+    const added = await db.query<{id: string}>(`insert into public.expenses (owner_id, shop_name, purchase_date, total_paid_satang)
+      values ($1, 'Previous year', '2025-11-07', 200), ($1, 'Other month', '2026-10-07', 300) returning id`, [alice]);
+    try {
+      const month = await request(app).get('/api/expenses?month=11').auth('alice-token', { type: 'bearer' }).expect(200);
+      expect(month.body).toMatchObject({totalCount: 3, runningTotalSatang: 5700});
+      const date = await request(app).get('/api/expenses?year=2026&month=11&day=7').auth('alice-token', { type: 'bearer' }).expect(200);
+      expect(date.body).toMatchObject({totalCount: 1, runningTotalSatang: 4500});
+      const organization = await request(app).get('/api/expenses?scope=organization&year=2026&month=11&day=7').auth('may-token', { type: 'bearer' }).expect(200);
+      expect(organization.body).toMatchObject({totalCount: 3, runningTotalSatang: 21500});
+      await request(app).get('/api/expenses?scope=organization&month=11').auth('alice-token', { type: 'bearer' }).expect(403);
+    } finally { await db.query('delete from public.expenses where id = any($1::uuid[])', [added.rows.map(row => row.id)]); }
+  });
+
   it('rejects invalid filters', async () => {
-    for (const query of ['?month=11', '?year=2026&month=13', '?scope=other', '?year=0',
+    for (const query of ['?month=13', '?day=0', '?day=32', '?year=2026&month=13', '?scope=other', '?year=0',
       '?scope=organization&ownerId=wrong', '?scope=organization&department=']) {
       await request(app).get(`/api/expenses${query}`)
         .auth('may-token', { type: 'bearer' }).expect(400);

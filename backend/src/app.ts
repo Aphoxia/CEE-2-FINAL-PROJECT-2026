@@ -43,6 +43,7 @@ const expenseQuery = z.strictObject({
   department: z.string().trim().min(1).max(50).optional(),
   year: z.string().regex(/^[0-9]{1,4}$/).transform(Number).pipe(z.int().min(1).max(9998)).optional(),
   month: z.string().regex(/^[0-9]{1,2}$/).transform(Number).pipe(z.int().min(1).max(12)).optional(),
+  day: z.string().regex(/^[0-9]{1,2}$/).transform(Number).pipe(z.int().min(1).max(31)).optional(),
   limit: z.string().regex(/^[0-9]{1,3}$/).transform(Number).pipe(z.int().min(1).max(100)).optional(),
   offset: z.string().regex(/^[0-9]{1,10}$/).transform(Number).pipe(z.int().min(0).max(2_147_483_647)).optional(),
 });
@@ -151,18 +152,18 @@ export function createApp(config: AppConfig) {
       return res.status(403).json({ error: 'finance_head_required' });
     }
     if (
-      (query.data.month !== undefined && query.data.year === undefined)
-      || (scope === 'own' && (query.data.ownerId !== undefined || query.data.department !== undefined))
+      (scope === 'own' && (query.data.ownerId !== undefined || query.data.department !== undefined))
     ) {
       return res.status(400).json({ error: 'invalid_expense_query' });
     }
 
-    const { data, error } = await supabase.rpc('list_expenses', {
+    const { data, error } = await supabase.rpc('list_expenses_calendar', {
       requested_scope: scope,
       filter_owner_id: query.data.ownerId ?? null,
       filter_department: query.data.department ?? null,
       filter_year: query.data.year ?? null,
       filter_month: query.data.month ?? null,
+      filter_day: query.data.day ?? null,
       page_limit: query.data.limit ?? 50,
       page_offset: query.data.offset ?? 0,
     });
