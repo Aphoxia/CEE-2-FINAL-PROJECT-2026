@@ -17,6 +17,13 @@ const entry = (): Entry => ({ description: '', amount: '' });
 const errorMessage = (e: unknown) => e instanceof Error ? e.message : 'เกิดข้อผิดพลาด';
 
 function App() {
+  const [theme, setTheme] = useState<'light' | 'dark'>(() => {
+    try {
+      const saved = window.localStorage.getItem('receipt-scanner-theme');
+      if (saved === 'light' || saved === 'dark') return saved;
+    } catch { /* Storage can be unavailable in private browsing. */ }
+    return window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  });
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(true);
   const [role, setRole] = useState('');
@@ -47,6 +54,12 @@ function App() {
   const [hadBreakdown, setHadBreakdown] = useState(false);
   const [file, setFile] = useState<File | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    try { window.localStorage.setItem('receipt-scanner-theme', theme); }
+    catch { /* The selected theme still works for this session without storage. */ }
+  }, [theme]);
 
   useEffect(() => {
     if (!supabase) { setLoading(false); return; }
@@ -196,7 +209,7 @@ function App() {
   const renderEntries = (kind: 'lineItems' | 'adjustments', title: string) => <fieldset><legend>{title}</legend>{draft[kind].map((item, i) => <div className="entry" key={i}><input aria-label={`${title} ชื่อ ${i + 1}`} placeholder="ชื่อรายการ" value={item.description} onChange={e => updateEntry(kind, i, 'description', e.target.value)} /><input aria-label={`${title} จำนวนเงิน ${i + 1}`} inputMode="decimal" placeholder="บาท" value={item.amount} onChange={e => updateEntry(kind, i, 'amount', e.target.value)} onBlur={e => updateEntry(kind, i, 'amount', formatMoneyInput(e.target.value))} /><button type="button" className="secondary" onClick={() => setDraft(d => ({ ...d, [kind]: d[kind].filter((_, n) => n !== i) }))}>ลบ</button></div>)}<button type="button" className="secondary" onClick={() => setDraft(d => ({ ...d, [kind]: [...d[kind], entry()] }))}>+ เพิ่ม{title}</button></fieldset>;
 
   if (!supabase) return <main><div className="card"><h1>ตั้งค่าโปรเจกต์ก่อนเริ่ม</h1><p>คัดลอก frontend/.env.example เป็น frontend/.env แล้วใส่ Supabase URL และ publishable key</p></div></main>;
-  return <main><header><div><p className="eyebrow">CEE PROJECT · TEST UI</p><h1>Receipt Scanner</h1><p>สแกน ตรวจสอบ และจัดการค่าใช้จ่าย</p></div>{session && <button className="secondary" onClick={() => supabase.auth.signOut()}>ออกจากระบบ</button>}</header>
+  return <main><header><div><p className="eyebrow">CEE PROJECT · TEST UI</p><h1>Receipt Scanner</h1><p>สแกน ตรวจสอบ และจัดการค่าใช้จ่าย</p></div><div className="header-actions"><button type="button" className="secondary theme-toggle" aria-pressed={theme === 'dark'} aria-label={theme === 'dark' ? 'ปิดโหมดมืด' : 'เปิดโหมดมืด'} onClick={() => setTheme(current => current === 'dark' ? 'light' : 'dark')}>{theme === 'dark' ? '☀️ โหมดสว่าง' : '🌙 โหมดมืด'}</button>{session && <button className="secondary" onClick={() => supabase.auth.signOut()}>ออกจากระบบ</button>}</div></header>
     {error && <p className="alert" role="alert">{error}</p>}{notice && <p className="notice" role="status">{notice}</p>}
     {loading ? <p>กำลังโหลด...</p> : !session ? <section className="card"><h2>เข้าสู่ระบบ</h2><p>ใช้บัญชี Google ที่เพิ่มเป็น test user แล้ว</p><button onClick={async () => { const { error: e } = await supabase.auth.signInWithOAuth({ provider:'google', options:{ redirectTo: window.location.origin } }); if (e) setError(e.message); }}>เข้าสู่ระบบด้วย Google</button></section> : !role ? <section className="card">กำลังตรวจสอบสิทธิ์สมาชิก หรือบัญชียังไม่ได้รับสิทธิ์</section> : <>
       <div className="identity">{session.user.email} <span className="badge">{role === 'finance_head' ? 'Finance Head' : 'สมาชิกทั่วไป'}</span></div>
