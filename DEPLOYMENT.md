@@ -1,4 +1,4 @@
-# Vercel test deployment
+# Vercel deployment
 
 Import the repository with the project root set to the repository root and Node.js 24. The root build command installs both packages and builds the Vite frontend. The Vercel Function in `api/[...path].ts` runs the same Express app without opening a listening port. Image uploads and JSON parsing are handled by Express.
 
