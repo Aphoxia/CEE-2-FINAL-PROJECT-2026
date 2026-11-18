@@ -14,8 +14,8 @@ type Expense = { id: string; shopName: string | null; payeeName: string | null; 
 type Detail = { shopName: string | null; payeeName: string | null; lineItems: {description:string;amountSatang:number}[] | null; adjustments: {description:string;amountSatang:number}[] | null };
 type Listing = { expenses: Expense[]; runningTotalSatang: number; totalCount: number };
 type ExpenseScope = 'own' | 'organization';
-const demoRoles = ['Board', 'Finance Head'] as const;
-type DemoRole = typeof demoRoles[number];
+const hasOrganizationAccess = (departments: string[]) =>
+  departments.includes('BOARD') || departments.includes('FINANCE');
 const blank = (): Draft => ({ documentType: 'receipt', payeeName: '', shopName: '', purchaseDate: '', total: '', lineItems: [], adjustments: [] });
 const entry = (): Entry => ({ description: '', amount: '' });
 const errorMessage = (e: unknown) => e instanceof Error ? e.message : 'เกิดข้อผิดพลาด';
@@ -30,7 +30,7 @@ function App() {
   });
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(true);
-  const [role, setRole] = useState('');
+  const [memberReady, setMemberReady] = useState(false);
   const [profiles, setProfiles] = useState<{ user_id: string; display_name: string }[]>([]);
   const [displayName, setDisplayName] = useState('');
   const [departments, setDepartments] = useState<string[]>([]);
@@ -44,9 +44,7 @@ function App() {
   const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState(false);
   const [scope, setScope] = useState<ExpenseScope>('own');
-  const [demoUntil, setDemoUntil] = useState<string | null>(null);
-  const [demoRole, setDemoRole] = useState<DemoRole | null>(null);
-  const canViewOrganization = role === 'finance_head' || demoUntil !== null;
+  const canViewOrganization = hasOrganizationAccess(myDepartments);
   const [year, setYear] = useState(''); const [month, setMonth] = useState('');
   const [exactDate, setExactDate] = useState('');
   const [dateMode, setDateMode] = useState<'all' | 'year' | 'month' | 'monthYear' | 'date'>('all');
@@ -78,11 +76,9 @@ function App() {
   }, []);
   useEffect(() => {
     listingRequest.current += 1;
-    setDemoUntil(null);
-    setDemoRole(null);
     setDepartment('');
     setOwner('');
-    setRole(''); setListing(null); setScope('own'); setDraft(blank()); setEditingId(null); setOpenDetailId(null); setDetailCache({}); setDetailLoading({}); setHadBreakdown(false); setDepartments([]); setMyDepartments([]); setProfiles([]); setDisplayName(''); setOwnerDepartments([]); setOwnerDepartmentsError(false); setOwnerDepartmentsLoading(false);
+    setMemberReady(false); setListing(null); setScope('own'); setDraft(blank()); setEditingId(null); setOpenDetailId(null); setDetailCache({}); setDetailLoading({}); setHadBreakdown(false); setDepartments([]); setMyDepartments([]); setProfiles([]); setDisplayName(''); setOwnerDepartments([]); setOwnerDepartmentsError(false); setOwnerDepartmentsLoading(false);
     if (!session || !supabase) return;
     let active = true;
     const client = supabase;
@@ -90,25 +86,24 @@ function App() {
       const { error: joinError } = await client!.rpc('ensure_member');
       if (!active) return;
       if (joinError) { setError('ไม่สามารถเปิดใช้งานบัญชีได้ กรุณาลองใหม่'); return; }
-      const membershipRequest = client!.from('organization_members').select('access_role').eq('user_id', session!.user.id).maybeSingle();
-      const otherRequests = Promise.all([
+      const [available, assigned, selfProfile] = await Promise.all([
         client!.from('departments').select('name').order('name'),
         client!.from('user_departments').select('department_name').eq('user_id', session!.user.id),
-        client!.from('member_profiles').select('user_id, display_name').order('display_name'),
-        client!.rpc('organization_demo_until'),
+        client!.from('member_profiles').select('user_id, display_name').eq('user_id', session!.user.id).maybeSingle(),
       ]);
-      const membership = await membershipRequest;
       if (!active) return;
-      if (membership.error || !membership.data) { setError('ไม่สามารถตรวจสอบสมาชิกได้'); return; }
-      setRole(membership.data.access_role); setError('');
-      const [available, assigned, profileRows, demoWindow] = await otherRequests;
-      if (!active) return;
-      setDemoUntil(typeof demoWindow.data === 'string' ? demoWindow.data : null);
-      if (available.error || assigned.error || profileRows.error) { setError('ไม่สามารถโหลดแผนกได้'); return; }
-      setProfiles(profileRows.data ?? []);
-      setDisplayName(profileRows.data?.find(row => row.user_id === session!.user.id)?.display_name ?? '');
+      if (available.error || assigned.error || selfProfile.error) {
+        setError('ไม่สามารถโหลดโปรไฟล์และแผนกได้');
+        return;
+      }
+      const assignedDepartments = (assigned.data ?? []).map(row => row.department_name);
+      setProfiles(selfProfile.data ? [selfProfile.data] : []);
+      setDisplayName(selfProfile.data?.display_name ?? '');
       setDepartments((available.data ?? []).map(row => row.name));
-      setMyDepartments((assigned.data ?? []).map(row => row.department_name));
+      setMyDepartments(assignedDepartments);
+      setScope(hasOrganizationAccess(assignedDepartments) ? 'organization' : 'own');
+      setError('');
+      setMemberReady(true);
     }
     void initialize();
     return () => { active = false; };
@@ -127,6 +122,18 @@ function App() {
       });
     return () => { active = false; };
   }, [listing, session?.user.id]);
+
+  useEffect(() => {
+    if (!supabase || !session || !memberReady || !canViewOrganization) return;
+    let active = true;
+    void supabase.from('member_profiles').select('user_id, display_name').order('display_name')
+      .then(({ data, error: profilesError }) => {
+        if (!active) return;
+        if (profilesError) setError('ไม่สามารถโหลดชื่อผู้บันทึกได้');
+        else setProfiles(data ?? []);
+      });
+    return () => { active = false; };
+  }, [session?.user.id, memberReady, canViewOrganization]);
 
   async function saveDisplayName(event: React.FormEvent) {
     event.preventDefault();
@@ -148,7 +155,20 @@ function App() {
       ? await supabase.from('user_departments').insert({ user_id: session.user.id, department_name: name })
       : await supabase.from('user_departments').delete().eq('user_id', session.user.id).eq('department_name', name);
     if (result.error) setError('ไม่สามารถเปลี่ยนแผนกได้ กรุณาลองใหม่');
-    else setMyDepartments(current => checked ? [...current, name] : current.filter(item => item !== name));
+    else {
+      const nextDepartments = checked ? [...myDepartments, name] : myDepartments.filter(item => item !== name);
+      const nextAccess = hasOrganizationAccess(nextDepartments);
+      setMyDepartments(nextDepartments);
+      if (nextAccess !== canViewOrganization) {
+        if (!nextAccess) {
+          setOwner('');
+          setDepartment('');
+          setProfiles(current => current.filter(profile => profile.user_id === session.user.id));
+        }
+        setDateMode('all');
+        changeScope(nextAccess ? 'organization' : 'own', 'all');
+      }
+    }
     setDepartmentBusy(false);
   }
 
@@ -188,34 +208,17 @@ function App() {
       if (requestId === listingRequest.current) setError(errorMessage(e));
     }
   }
-  useEffect(() => { if (session && role) void load(0, 'own', 'all'); }, [session?.user.id, role]);
+  useEffect(() => { if (session && memberReady) void load(0, scope, 'all'); }, [session?.user.id, memberReady]);
 
-  function changeScope(nextScope: ExpenseScope) {
+  function changeScope(nextScope: ExpenseScope, nextDateMode = dateMode) {
     listingRequest.current += 1;
     setScope(nextScope);
     setListing(null);
     setOpenDetailId(null);
     setDetailCache({});
-    void load(0, nextScope);
+    void load(0, nextScope, nextDateMode);
   }
 
-  useEffect(() => {
-    if (!demoUntil) return;
-    const expire = () => {
-      setDemoUntil(null);
-      setDemoRole(null);
-      if (role === 'finance_head' || scope !== 'organization') return;
-      listingRequest.current += 1;
-      setScope('own');
-      setListing(null);
-      setOpenDetailId(null);
-      setDetailCache({});
-      setDateMode('all');
-      void load(0, 'own', 'all');
-    };
-    const timer = window.setTimeout(expire, Math.max(0, Date.parse(demoUntil) - Date.now()));
-    return () => window.clearTimeout(timer);
-  }, [demoUntil, session?.user.id, role, scope]);
   async function scan() {
     if (!file) { setError('กรุณาเลือกรูปใบเสร็จก่อน'); return; }
     setBusy(true); setError(''); setNotice('');
@@ -265,38 +268,17 @@ function App() {
   if (!supabase) return <main className="app-shell"><section className="card setup-card"><span className="brand-mark">R</span><p className="eyebrow">ตั้งค่าระบบ</p><h1>เชื่อมต่อฐานข้อมูลก่อนเริ่ม</h1><p className="muted">คัดลอก <code>frontend/.env.example</code> เป็น <code>frontend/.env</code> แล้วใส่ Supabase URL และ publishable key</p></section></main>;
   return <main className="app-shell"><header className="topbar"><div className="brand-lockup"><span className="brand-mark" aria-hidden="true">R</span><div><p className="brand-name">Receipt Scanner</p></div></div><div className="header-actions"><button type="button" className="secondary theme-toggle" aria-pressed={theme === 'dark'} aria-label={theme === 'dark' ? 'ปิดโหมดมืด' : 'เปิดโหมดมืด'} onClick={() => setTheme(current => current === 'dark' ? 'light' : 'dark')}>{theme === 'dark' ? '☀️ โหมดสว่าง' : '🌙 โหมดมืด'}</button>{session && <button className="secondary" onClick={() => supabase.auth.signOut()}>ออกจากระบบ</button>}</div></header>
     {(error || notice) && <div className="feedback-stack">{error && <p className="alert" role="alert">{error}</p>}{notice && <p className="notice" role="status">{notice}</p>}</div>}
-    {loading ? <section className="card loading-card"><span className="spinner" aria-hidden="true" /><p>กำลังโหลดข้อมูลของคุณ…</p></section> : !session ? <section className="auth-layout"><section className="card auth-card"><span className="auth-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M6 3.75h12a1.5 1.5 0 0 1 1.5 1.5v15l-2.5-1.5-2.5 1.5-2.5-1.5-2.5 1.5-2.5-1.5-2.5 1.5v-15a1.5 1.5 0 0 1 1.5-1.5Z" /><path d="M9 8h6M9 12h6M9 16h3" /></svg></span><h1>เข้าสู่ระบบ</h1><button className="google-button" onClick={async () => { const { error: e } = await supabase.auth.signInWithOAuth({ provider:'google', options:{ redirectTo: window.location.origin } }); if (e) setError(e.message); }}><span className="google-g" aria-hidden="true">G</span>เข้าสู่ระบบด้วย Google<span className="button-arrow" aria-hidden="true">→</span></button></section></section> : !role ? <section className="card loading-card"><span className="spinner" aria-hidden="true" /><p>กำลังตรวจสอบสิทธิ์สมาชิก…</p></section> : <>
-      <section className="dashboard-heading"><div><p className="eyebrow">ภาพรวมค่าใช้จ่าย</p><h1>สวัสดี, {displayName || 'สมาชิก'}</h1><p className="muted">จัดการใบเสร็จและตรวจสอบรายการล่าสุดของคุณ</p></div><div className="identity"><span className="account-email">{session.user.email}</span><span className="badge">{role === 'finance_head' ? 'Finance Head' : 'สมาชิกทั่วไป'}</span></div></section>
+    {loading ? <section className="card loading-card"><span className="spinner" aria-hidden="true" /><p>กำลังโหลดข้อมูลของคุณ…</p></section> : !session ? <section className="auth-layout"><section className="card auth-card"><span className="auth-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M6 3.75h12a1.5 1.5 0 0 1 1.5 1.5v15l-2.5-1.5-2.5 1.5-2.5-1.5-2.5 1.5-2.5-1.5-2.5 1.5v-15a1.5 1.5 0 0 1 1.5-1.5Z" /><path d="M9 8h6M9 12h6M9 16h3" /></svg></span><h1>เข้าสู่ระบบ</h1><button className="google-button" onClick={async () => { const { error: e } = await supabase.auth.signInWithOAuth({ provider:'google', options:{ redirectTo: window.location.origin } }); if (e) setError(e.message); }}><span className="google-g" aria-hidden="true">G</span>เข้าสู่ระบบด้วย Google<span className="button-arrow" aria-hidden="true">→</span></button></section></section> : !memberReady ? <section className="card loading-card"><span className="spinner" aria-hidden="true" /><p>กำลังตรวจสอบสิทธิ์สมาชิก…</p></section> : <>
+      <section className="dashboard-heading"><div><p className="eyebrow">ภาพรวมค่าใช้จ่าย</p><h1>สวัสดี, {displayName || 'สมาชิก'}</h1><p className="muted">จัดการใบเสร็จและตรวจสอบรายการล่าสุดของคุณ</p></div><div className="identity"><span className="account-email">{session.user.email}</span><span className="badge">{canViewOrganization ? 'ดูได้ทั้งองค์กร' : 'สมาชิกทั่วไป'}</span></div></section>
       <div className="account-grid"><section className="card profile-card"><div className="section-heading"><div><p className="eyebrow">บัญชีของคุณ</p><h2>โปรไฟล์</h2></div><span className="section-icon" aria-hidden="true">◉</span></div><form className="profile-form" onSubmit={saveDisplayName}><label>ชื่อแสดงผล<input value={displayName} maxLength={100} onChange={e => setDisplayName(e.target.value)} /></label><button disabled={busy}>บันทึกชื่อ</button></form><p className="muted">ชื่อแสดงผลซ้ำกันได้ และเปลี่ยนภายหลัง</p></section>
-      <section className="card department-card"><div className="section-heading"><div><p className="eyebrow">จัดหมวดหมู่</p><h2>แผนกในชมรม</h2></div><span className="section-icon" aria-hidden="true">⌘</span></div><p className="muted">เลือกได้หลายแผนก แผนกใช้จัดหมวดหมู่และไม่เปลี่ยนสิทธิ์ Finance Head</p><div className="department-options">{myDepartments.includes('MEMBER_RELATIONS') && <label><input type="checkbox" checked disabled={departmentBusy} onChange={() => toggleDepartment('MEMBER_RELATIONS', false)} /><span>{departmentLabel('MEMBER_RELATIONS')}</span></label>}{selectableDepartments.map(([id, label]) => <label key={id}><input type="checkbox" checked={myDepartments.includes(id)} disabled={departmentBusy} onChange={e => toggleDepartment(id, e.target.checked)} /><span>{label}</span></label>)}</div></section></div>
+      <section className="card department-card"><div className="section-heading"><div><p className="eyebrow">จัดหมวดหมู่</p><h2>แผนกในชมรม</h2></div><span className="section-icon" aria-hidden="true">⌘</span></div><p className="muted">เลือกได้หลายแผนก · เลือก Board หรือ Finance เพื่ออ่านบิลทั้งองค์กร</p><div className="department-options">{myDepartments.includes('MEMBER_RELATIONS') && <label><input type="checkbox" checked disabled={departmentBusy} onChange={() => toggleDepartment('MEMBER_RELATIONS', false)} /><span>{departmentLabel('MEMBER_RELATIONS')}</span></label>}{selectableDepartments.map(([id, label]) => <label key={id}><input type="checkbox" checked={myDepartments.includes(id)} disabled={departmentBusy} onChange={e => toggleDepartment(id, e.target.checked)} /><span>{label}</span></label>)}</div></section></div>
       <div className="layout"><section className="card expense-form-card"><div className="section-heading"><div><p className="eyebrow">บันทึกรายการ</p><h2>{editingId ? 'แก้ไขค่าใช้จ่าย' : 'เพิ่มค่าใช้จ่าย'}</h2></div><span className="section-icon" aria-hidden="true">＋</span></div><p className="muted">สแกนใบเสร็จหรือกรอกเอง · จำนวนเงินเป็นบาท</p><div className="scan"><input ref={fileInput} type="file" accept="image/jpeg,image/png,image/webp" aria-label="รูปใบเสร็จ" onChange={e => setFile(e.target.files?.[0] ?? null)} /><button type="button" disabled={busy} onClick={scan}>สแกนใบเสร็จ</button></div>{file && <p className="selected-file">เลือกรูปแล้ว: {file.name}</p>}<form className="expense-form" onSubmit={save}><label>ประเภทเอกสาร<select value={draft.documentType} onChange={e => setDraft({ ...draft, documentType:e.target.value as Draft['documentType'] })}><option value="receipt">ใบเสร็จ</option><option value="transfer">สลิปโอนเงิน</option></select></label><label>ร้านค้า<input maxLength={200} value={draft.shopName} onChange={e => setDraft({ ...draft, shopName:e.target.value })} /></label><label>ผู้รับเงิน<input maxLength={200} value={draft.payeeName} onChange={e => setDraft({ ...draft, payeeName:e.target.value })} /></label><p className="muted">ระบุชื่อร้านค้าหรือผู้รับเงินอย่างน้อยหนึ่งช่อง</p><label>วันที่<input required type="date" value={draft.purchaseDate} onChange={e => setDraft({ ...draft, purchaseDate:e.target.value })} /></label><label>ยอดจ่ายจริง (บาท)<input required inputMode="decimal" value={draft.total} onChange={e => setDraft({ ...draft, total:e.target.value })} onBlur={e => setDraft(d => ({ ...d, total:formatMoneyInput(e.target.value) }))} /></label>{renderEntries('lineItems','รายการสินค้า')}{renderEntries('adjustments','ส่วนปรับยอด')}<p className="muted">ส่วนลดใช้ค่าติดลบ เช่น -5.00 · ผลรวมต้องตรงยอดจ่ายจริง</p><div className="actions"><button disabled={busy}>{editingId ? 'บันทึกการแก้ไข' : 'ยืนยันและบันทึก'}</button><button type="button" className="secondary" onClick={() => {setDraft(blank()); setEditingId(null);}}>ล้างแบบฟอร์ม</button></div></form></section>
-      <section className="card expense-list-card"><div className="section-heading list-heading"><div><p className="eyebrow">รายการบันทึก</p><h2>ค่าใช้จ่าย</h2></div>{listing && <span className="count-pill">{listing.totalCount} รายการ</span>}</div><p className="muted">รายการล่าสุดอยู่ด้านบน · แผนกเป็นข้อมูลปัจจุบันของผู้บันทึก · เลื่อนตารางในแนวนอนได้เมื่อใช้จอเล็ก</p>{demoUntil && (
-        <fieldset>
-          <legend>เลือกบทบาทสำหรับการสาธิต</legend>
-          <div className="department-options">
-            {demoRoles.map(name => (
-              <label key={name}>
-                <input
-                  type="checkbox"
-                  checked={demoRole === name}
-                  onChange={event => {
-                    const selected = event.currentTarget.checked;
-                    setDemoRole(selected ? name : null);
-                    changeScope(selected ? 'organization' : 'own');
-                  }}
-                />
-                {name}
-              </label>
-            ))}
-          </div>
-        </fieldset>
-      )}
+      <section className="card expense-list-card"><div className="section-heading list-heading"><div><p className="eyebrow">รายการบันทึก</p><h2>ค่าใช้จ่าย</h2></div>{listing && <span className="count-pill">{listing.totalCount} รายการ</span>}</div><p className="muted">รายการล่าสุดอยู่ด้านบน · แผนกเป็นข้อมูลปัจจุบันของผู้บันทึก · เลื่อนตารางในแนวนอนได้เมื่อใช้จอเล็ก</p>
       <form onSubmit={e => { e.preventDefault(); void load(); }} className="filters">
         {canViewOrganization && (
           <label>ขอบเขต
             <select value={scope} onChange={event => {
               const nextScope = event.currentTarget.value === 'organization' ? 'organization' : 'own';
-              if (nextScope === 'own') setDemoRole(null);
               changeScope(nextScope);
             }}>
               <option value="own">ของฉัน</option>

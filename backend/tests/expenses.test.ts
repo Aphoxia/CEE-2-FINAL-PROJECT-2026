@@ -852,3 +852,39 @@ describe('receipt scan and confirmation', () => {
     expect(detail.body).toMatchObject({ lineItems: null, adjustments: [], scanId: null });
   });
 });
+
+describe('organization access after switching to department checkboxes', () => {
+  it('grants reads immediately and revokes them after the last eligible department is cleared', async () => {
+    await db.exec(await readFile(new URL('../../supabase/migrations/20261118000010_department_access.sql', import.meta.url), 'utf8'));
+    const token = 'empty-member-token';
+    const organization = '/api/expenses?scope=organization';
+    const expense = await db.query<{ id: string }>("select id from public.expenses where shop_name = 'Bob shop'");
+    const detail = `/api/expenses/${expense.rows[0].id}`;
+
+    await request(app).get(organization).auth(token, { type: 'bearer' }).expect(403);
+    await request(app).get(organization).auth('may-token', { type: 'bearer' }).expect(200);
+
+    async function selectDepartment(department: string) {
+      await queryAsUser(emptyMember, 'insert into public.user_departments (user_id, department_name) values ($1, $2)', [emptyMember, department]);
+    }
+
+    async function clearDepartment(department: string) {
+      await queryAsUser(emptyMember, 'delete from public.user_departments where user_id = $1 and department_name = $2', [emptyMember, department]);
+    }
+
+    await selectDepartment('IT');
+    await request(app).get(organization).auth(token, { type: 'bearer' }).expect(403);
+    await selectDepartment('BOARD');
+    await request(app).get(organization).auth(token, { type: 'bearer' }).expect(200);
+    await request(app).get(detail).auth(token, { type: 'bearer' }).expect(200);
+    await request(app).delete(detail).auth(token, { type: 'bearer' }).expect(404);
+
+    await selectDepartment('FINANCE');
+    await clearDepartment('BOARD');
+    await request(app).get(organization).auth(token, { type: 'bearer' }).expect(200);
+
+    await clearDepartment('FINANCE');
+    await request(app).get(organization).auth(token, { type: 'bearer' }).expect(403);
+    await request(app).get(detail).auth(token, { type: 'bearer' }).expect(404);
+  });
+});
