@@ -57,6 +57,7 @@ beforeAll(async () => {
   ));
   await db.exec(await readFile(new URL('../../supabase/migrations/20261108000006_member_display_names.sql', import.meta.url), 'utf8'));
   await db.exec(await readFile(new URL('../../supabase/migrations/20261108000007_calendar_filters.sql', import.meta.url), 'utf8'));
+  await db.exec(await readFile(new URL('../../supabase/migrations/20261118000009_organization_demo_window.sql', import.meta.url), 'utf8'));
   await db.query('insert into auth.users (id) values ($1), ($2), ($3), ($4), ($5)', [
     alice, bob, guest, emptyMember, may,
   ]);
@@ -299,6 +300,33 @@ describe('GET /api/expenses', () => {
       .auth('alice-token', { type: 'bearer' }).expect(403, { error: 'finance_head_required' });
     await request(app).get('/api/expenses?scope=organization&access_role=finance_head')
       .auth('alice-token', { type: 'bearer' }).expect(400);
+  });
+
+  it('allows organization reads for members only during the presentation window', async () => {
+    await db.exec("update public.organization_demo_settings set enabled_until = now() + interval '1 hour'");
+    try {
+      await request(app).get('/api/expenses?scope=organization&department=BOARD')
+        .auth('alice-token', { type: 'bearer' }).expect(200)
+        .expect(({ body }) => expect(body.expenses).toContainEqual(expect.objectContaining({ ownerId: bob })));
+      const other = await queryAsUser(alice, 'select id from public.expenses where owner_id = $1', [bob]);
+      expect(other.rows).toHaveLength(1);
+      const expenseId = (other.rows[0] as { id: string }).id;
+      await request(app).get(`/api/expenses/${expenseId}`)
+        .auth('alice-token', { type: 'bearer' }).expect(200);
+      await request(app).delete(`/api/expenses/${expenseId}`)
+        .auth('alice-token', { type: 'bearer' }).expect(404);
+      await request(app).get('/api/expenses?scope=organization')
+        .auth('guest-token', { type: 'bearer' }).expect(403);
+      await expect(queryAsUser(alice, 'update public.organization_demo_settings set enabled_until = null')).rejects.toThrow();
+
+      await db.exec("update public.organization_demo_settings set enabled_until = now() - interval '1 second'");
+      await request(app).get('/api/expenses?scope=organization')
+        .auth('alice-token', { type: 'bearer' }).expect(403);
+      await request(app).get(`/api/expenses/${expenseId}`)
+        .auth('alice-token', { type: 'bearer' }).expect(404);
+    } finally {
+      await db.exec('update public.organization_demo_settings set enabled_until = null');
+    }
   });
 
   it('lets Finance Head read all retained expenses without duplicating multi-department users', async () => {

@@ -20,7 +20,6 @@ type AppConfig = {
 type Session = {
   supabase: SupabaseClient;
   userId: string;
-  accessRole: string;
 };
 
 const breakdownFields = { lineItems: lineItems.optional(), adjustments: adjustments.optional() };
@@ -80,7 +79,7 @@ export function createApp(config: AppConfig) {
 
     const { data: membership, error: membershipError } = await supabase
       .from('organization_members')
-      .select('user_id, access_role')
+      .select('user_id')
       .eq('user_id', user.id)
       .maybeSingle();
 
@@ -92,7 +91,6 @@ export function createApp(config: AppConfig) {
     res.locals.session = {
       supabase,
       userId: user.id,
-      accessRole: membership.access_role,
     } satisfies Session;
     next();
   });
@@ -133,7 +131,7 @@ export function createApp(config: AppConfig) {
   });
 
   app.get('/api/expenses', async (req, res) => {
-    const { supabase, accessRole }: Session = res.locals.session;
+    const { supabase }: Session = res.locals.session;
     const parameters = { ...req.query };
     // Vercel adds the catch-all route parameter to its query helper. It is not
     // a user-selected filter; keep rejecting any other unexpected parameters.
@@ -148,9 +146,6 @@ export function createApp(config: AppConfig) {
     }
 
     const scope = query.data.scope ?? 'own';
-    if (scope === 'organization' && accessRole !== 'finance_head') {
-      return res.status(403).json({ error: 'finance_head_required' });
-    }
     if (
       (scope === 'own' && (query.data.ownerId !== undefined || query.data.department !== undefined))
     ) {
@@ -169,7 +164,7 @@ export function createApp(config: AppConfig) {
     });
 
     if (error?.code === '42501') {
-      return res.status(403).json({ error: 'access_denied' });
+      return res.status(403).json({ error: scope === 'organization' ? 'finance_head_required' : 'access_denied' });
     }
     if (error) throw error;
     return res.json(data);

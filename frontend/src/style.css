@@ -159,7 +159,6 @@ fieldset > .secondary { padding: 8px 10px; font-size: .78rem; }
 .expense-table .date-cell, .expense-table .amount { white-space: nowrap; font-variant-numeric: tabular-nums; }
 .expense-table .amount { text-align: right; font-weight: 700; }
 .expense-table th.amount { text-align: right; }
-.expense-table.preview-table { min-width: 570px; }
 .owner-id { display: block; margin-top: 4px; font-size: .7rem; }
 .type-tag { display: inline-block; padding: 5px 8px; border-radius: 7px; color: var(--green); background: var(--green-soft); font-size: .73rem; white-space: nowrap; }
 .table-actions { display: flex; align-items: center; gap: 2px; white-space: nowrap; }
