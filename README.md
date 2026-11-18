@@ -37,3 +37,7 @@ TERMINAL_GUIDE.md        Git and Vercel command guide
 5. Run the checks with `npm test --prefix backend`, `npm test --prefix frontend`, and `npm run build --prefix frontend`.
 
 See [DEPLOYMENT.md](DEPLOYMENT.md) for production environment settings and [TERMINAL_GUIDE.md](TERMINAL_GUIDE.md) for the Git/Vercel workflow.
+
+## comment 
+
+- **regret** vibe coding so head i regert my life desicion 

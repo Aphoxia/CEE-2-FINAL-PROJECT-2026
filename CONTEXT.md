@@ -49,3 +49,4 @@ A change to the receipt total excluded from the line amounts, such as a receipt-
 
 **Reconciled receipt**
 A receipt whose line amounts plus receipt adjustments equal the total paid exactly.
+
